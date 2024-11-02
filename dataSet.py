@@ -6,7 +6,10 @@ import shutil
 import zipfile
 import random
 import re
-        
+import numpy as np
+import contextlib
+import mne
+
 """
 Source:
 This data is obtained from the OpenfMRI database. 
@@ -24,7 +27,10 @@ class OpenFMRIDataSet(Dataset):
     Attributes:
         toggleLoadData (bool): Flag to toggle if data should be loaded upon instantiation.
         datasetPath (str): Path to the dataset directory.
+        mode (str): The mode of the dataset, can be 'train', 'val', or 'test'.
         downloadURLs (list): List of URLs to download the dataset from.
+        memoryBound (int): The memory bound in GB.
+        VRAMBound (int): The VRAM bound in GB.
         logger (logging.Logger): Logger for logging information and debug messages.
         verbose (bool): Flag to set the logger to debug level for verbose output.
 
@@ -44,6 +50,23 @@ class OpenFMRIDataSet(Dataset):
         ]
         self.downloadURLs = kwargs.get('downloadURLs', defaultDownloadURLs)
 
+        self.mode = kwargs.get('mode', 'train')
+
+        self.memoryLimit = kwargs.get('memoryBound', '32')
+        self.vramLimit = kwargs.get('vramLimit', '16')
+        self.memoryChunkSize = kwargs.get('memoryChunkSize', '4')
+        self.vramChunkSize = kwargs.get('memoryChunkSize', '8')
+
+        # Ensure VRAM and memory settings are logical
+        if int(self.vramLimit) <= int(self.vramChunkSize):
+            raise ValueError("VRAM limit must be greater than VRAM chunk size.")
+        
+        if int(self.memoryLimit) <= int(self.memoryChunkSize):
+            raise ValueError("Memory limit must be greater than memory chunk size.")
+
+        self.eegValuesType = kwargs.get('eegValuesType', np.float16)
+        self.megValuesType = kwargs.get('eegValuesType', np.float16)
+
         self.logger = kwargs.get('logger', None)
         self.verbose = kwargs.get('verbose', False)
 
@@ -55,8 +78,15 @@ class OpenFMRIDataSet(Dataset):
             self.logger.setLevel(logging.DEBUG)
 
         if self.toggleLoadData:
+            self.logger.info("Loading entire dataset...")
             self._loadDataSet()
-
+        
+         ### change datasetPath to point to train, val, or test after loading the data
+        self.datasetPath = os.path.join(self.datasetPath,self.mode)
+        
+        self.logger.info(f"Loading dataset in {self.mode} mode...")
+        self._countFrames()
+        self._calculateChunkNumber()
         
 
     ### logic for loading (downloading, preprocessing) the dataset
@@ -246,6 +276,7 @@ class OpenFMRIDataSet(Dataset):
         """
         ### split participant folders into train, test, and val subfolders        
         participantFolders = os.listdir(self.datasetPath)
+        random.seed(42)
         random.shuffle(participantFolders)
 
         total_participants = len(participantFolders)
@@ -269,6 +300,87 @@ class OpenFMRIDataSet(Dataset):
                 shutil.move(participantFolderPath, val_folder)
             else:
                 shutil.move(participantFolderPath, test_folder)
+
+    def _countFrames(self):
+        """
+        Counts the number of frames in the dataset and sets the frame count.
+
+        This method iterates over all participant folders in the self.datasetPath folder,
+        reading EEG and MEG data from .fif files to count the total number of frames.
+        It ensures that the EEG and MEG frame counts are equal and sets the frameCount
+        attribute accordingly. Additionally, it sets the eegChannelCount and megChannelCount
+        attributes based on the data.
+
+        Raises:
+        - AssertionError: If the EEG and MEG frame counts are not equal.
+        - Exception: If there is an error reading the .fif files.
+        """
+        frame_count_file = os.path.join(self.datasetPath, '.frameCount')
+
+        if os.path.exists(frame_count_file):
+            with open(frame_count_file, 'r') as f:
+                self.frameCount = int(f.read().strip())
+            self.logger.info(f"Loaded cached frame count: {self.frameCount}")
+        else:
+            eeg_frame_count = 0
+            meg_frame_count = 0
+            eeg_channels = 0
+            meg_channels = 0
+
+            participantFolders = [f for f in os.listdir(self.datasetPath) if not f.startswith('.') and not f.endswith('.zip')]
+            
+            self.logger.info("Counting frames in dataset...")
+            for participantFolder in participantFolders:
+                fif_files = [file for file in os.listdir(os.path.join(self.datasetPath, participantFolder)) if file.endswith('.fif')]
+                for fif in fif_files:
+                    fif_path = os.path.join(self.datasetPath, participantFolder, fif)
+                    try:
+                        with contextlib.redirect_stdout(None), contextlib.redirect_stderr(None): ## suppresses output about file format not conforming to standards
+                            raw_data = mne.io.read_raw_fif(fif_path, preload=False, verbose=False)
+                    except Exception as e:
+                        raise e
+                    eeg_data = raw_data.get_data(picks='eeg')
+                    meg_data = raw_data.get_data(picks='meg')
+                    del raw_data
+                    eeg_frame_count += eeg_data.shape[1]
+                    meg_frame_count += meg_data.shape[1]
+                    eeg_channels = eeg_data.shape[0]
+                    meg_channels = meg_data.shape[0]
+                    del eeg_data
+                    del meg_data
+            assert eeg_frame_count == meg_frame_count, "EEG and MEG frame count not equal."
+            self.frameCount = eeg_frame_count
+            self.eegChannelCount = eeg_channels
+            self.megChannelCount = meg_channels
+            self.logger.info(f"Success counting {self.frameCount} frames in dataset...")
+
+            with open(frame_count_file, 'w') as f:
+                f.write(str(self.frameCount))
+
+    def _calculateChunkNumber(self):
+        self.logger.info("Calculating chunk sizes...")
+        eegValueTypeSize = np.dtype(self.eegValuesType).itemsize
+        totalEEGSize = self.eegChannelCount * self.frameCount * eegValueTypeSize
+
+        megValueTypeSize = np.dtype(self.megValuesType).itemsize
+        totalMEGSize = self.megChannelCount * self.frameCount * megValueTypeSize
+
+        totalSize = (totalEEGSize + totalMEGSize) 
+        
+        self.logger.info(f"Size of EEG and MEG data in {self.mode} data: {totalSize/ (1000**3):.2f} GB")
+
+        memoryChunkSizeBytes = int(self.memoryChunkSize) * (1000 ** 3)
+        vramChunkSizeBytes = int(self.vramChunkSize) * (1000 ** 3)
+
+        self.memoryChunkNumber = totalSize // memoryChunkSizeBytes
+        self.vramChunkNumber = totalSize // vramChunkSizeBytes
+
+        self.logger.info(f"Memory Chunk Number: {self.memoryChunkNumber}")
+        self.logger.info(f"VRAM Chunk Number: {self.vramChunkNumber}")
+
+        #### calculate chunk boundaries
+
+
 
     def __getitem__(self, index):
         pass
@@ -303,11 +415,3 @@ class OpenFMRIDataSet(Dataset):
             os.rmdir(current_path)
             current_path = parent_path
         
-
-
-    
-
-
-    
-
-
