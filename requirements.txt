@@ -1,5 +1,2 @@
-<<<<<<< Updated upstream
 mne
 torch==2.4
-=======
->>>>>>> Stashed changes
