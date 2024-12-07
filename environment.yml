@@ -4,7 +4,7 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - mne
+  - mne>=1.4.0
   - numpy
   - pytorch
   - scipy
