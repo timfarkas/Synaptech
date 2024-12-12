@@ -1,2 +1,5 @@
 mne
 torch==2.4
+pandas
+ipython
+plotly
