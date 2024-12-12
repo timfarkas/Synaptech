@@ -1,0 +1,15 @@
+name: synaptech_env
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - mne
+  - numpy
+  - python=3.10
+  - pytorch
+  - scipy
+  - torchaudio
+  - torchvision
+  - ipykernel
+  - pandas
+prefix: /home/azureuser/miniconda3/envs/synaptech_env
