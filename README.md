@@ -21,12 +21,16 @@ Install dependencies
 pip install -r requirements.txt
 ```
 
-Download & process the openfmri datasets:
+Set up .env to point to dataset
 ```
-cd data_magic
+DATASET_PATH="openfrmi/data"
+```
+
+Start your first training run!
+```
 python training.py
 ```
-(will take some time)
+(first run init will take some time as it will automatically load, prepare, and preprocess the dataset)
 
 Train the model: 
 ## Run the model 💥🏃‍♂️🔥
