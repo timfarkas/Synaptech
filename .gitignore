@@ -1,6 +1,8 @@
 .venv
 .env
 data/
+data_archive/
+
 test.py
 __pycache__/
 

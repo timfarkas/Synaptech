@@ -49,7 +49,7 @@ class OpenFMRIDataSet(Dataset):
         _processDataset(): Processes the downloaded dataset.
     """
     def __init__(self,**kwargs):
-        self.datasetPath = kwargs.get('dataPath', os.path.join('data','openfmri'))
+        self.datasetPath = kwargs.get('datasetPath', os.path.join('data','openfmri'))
         self.mode = kwargs.get('mode', 'train')
 
         self.eegValuesType = kwargs.get('eegValuesType', np.float16)
@@ -83,8 +83,8 @@ class OpenFMRIDataSet(Dataset):
         self.datasetPath = os.path.join(self.datasetPath,self.mode)
 
         ### FIF MEG AND EEG INDICES (hardcoded for now)
-        self.meg_indices = np.arange(2,306,3)
-        self.eeg_indices = np.arange(306, 380, 1)
+        self.meg_indices = list(range(2, 306, 3))
+        self.eeg_indices = list(range(306, 380, 1))
 
 
         self.logger.info(f"\n\nLoading dataset in {self.mode} mode...")
