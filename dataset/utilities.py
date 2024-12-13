@@ -33,7 +33,7 @@ class DatasetDownloader:
         passedDownloadURLs = kwargs.get('downloadURLs', defaultDownloadURLs)
         self.downloadURLs = passedDownloadURLs if passedDownloadURLs else defaultDownloadURLs
 
-        self.datasetPath = kwargs.get('datasetPath', os.path.join('data','openfmri'))
+        self.datasetPath = kwargs.get('datasetPath', os.path.join('/srv','synaptech_openfmri'))
 
         self.logger = kwargs.get('logger', None)
         self.verbose = kwargs.get('verbose', False)

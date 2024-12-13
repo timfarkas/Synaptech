@@ -49,7 +49,7 @@ class OpenFMRIDataSet(Dataset):
         _processDataset(): Processes the downloaded dataset.
     """
     def __init__(self,**kwargs):
-        self.datasetPath = kwargs.get('datasetPath', os.path.join('data','openfmri'))
+        self.datasetPath = kwargs.get('datasetPath', os.path.join('/srv','synaptech_openfmri'))
         self.mode = kwargs.get('mode', 'train')
 
         self.eegValuesType = kwargs.get('eegValuesType', np.float16)
@@ -72,6 +72,7 @@ class OpenFMRIDataSet(Dataset):
 
         if self.toggleLoadData:
             downloader = DatasetDownloader(downloadAndPrepareImmediately=True,
+                                            datasetPath = self.datasetPath,
                                            processImmediately=self.toggleProcessData, 
                                            processingMode=self.processingMode,
                                            logger = self.logger, 
