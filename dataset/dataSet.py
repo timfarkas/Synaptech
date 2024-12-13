@@ -87,16 +87,17 @@ class OpenFMRIDataSet(Dataset):
         self.meg_indices = list(range(2, 306, 3))
         self.eeg_indices = list(range(306, 380, 1))
 
-
         self.logger.info(f"\n\nLoading dataset in {self.mode} mode...")
         sampleRate = kwargs.get('sampleRate', 1100)
         windowLength = kwargs.get('windowLength', 250)
         windowOverlap = kwargs.get('windowOverlap', 0.3)
-        
+
         self._countWindows(self.processingMode, 
                            sampleRate=sampleRate, 
                            windowLength=windowLength, 
                            windowOverlap=windowOverlap)
+        self.totalRuns = len(self.fif_files)
+        self.emovs ### calculate emovs
 
 
     def _countWindows(self, mode, sampleRate=1100, windowLength=250, windowOverlap=0.3):
@@ -218,11 +219,156 @@ class OpenFMRIDataSet(Dataset):
         self.totalWindows = sum([count for sublist in self._participantWindowCounts for count in sublist])
         self.logger.info(f"Found {self.totalWindows} windows...")
 
+    @property
+    def fif_files(self):
+        """
+        Gathers and returns a list of FIF files for each subject and run.
+
+        This property checks if the attribute '_fif_files' already exists. If it does, 
+        it returns the existing list. 
+        Otherwise, it constructs the list by iterating 
+        over the subjects and their corresponding run files in the '_participantRunsDict'. 
+        Each FIF file path is constructed by joining the dataset path, subject, and run file.
+        
+        Returns:
+            list: A list of file paths to the FIF files.
+        """
+        if not hasattr(self, '_fif_files'):
+            self._fif_files = []
+            for subject in self._participantRunsDict:
+                for run_file in self._participantRunsDict[subject]:
+                    fif_file = os.path.join(self.datasetPath, subject, run_file)
+                    self._fif_files.append(fif_file)
+        return self._fif_files
+
+    def _gatherSensorCoordinates(self):
+        """
+        Gathers sensor coordinates and channel names for EEG and MEG data.
+
+        This method processes each run's FIF file to extract sensor coordinates and channel names
+        for both EEG and MEG data. It also retrieves the transformation matrix from device to head
+        for MEG data. The method suppresses warnings and redirects output to avoid cluttering the console.
+
+        Returns:
+            tuple: A tuple containing:
+                - A tuple of lists: (all_eeg_channel_locs, all_eeg_channel_names)
+                  where all_eeg_channel_locs is a list of EEG channel locations for each run,
+                  and all_eeg_channel_names is a list of EEG channel names for each run.
+                - A tuple of lists: (all_meg_channel_locs, all_meg_channel_names)
+                  where all_meg_channel_locs is a list of MEG channel locations for each run,
+                  and all_meg_channel_names is a list of MEG channel names for each run.
+                - A tuple of lists: (all_channel_locs, all_channel_names)
+                  where all_channel_locs is a list of all channel locations for each run,
+                  and all_channel_names is a list of all channel names for each run.
+                - list: all_meg_transforms, a list of transformation matrices from device coordinates to head coordinates
+                  for each run (MEG device -> EEG coordinates).
+        """
+        all_channel_names = []
+        all_eeg_channel_names = []
+        all_meg_channel_names = []
+
+        all_channel_locs = []
+        all_eeg_channel_locs = []
+        all_meg_channel_locs = []
+
+        all_meg_transforms = []
+
+        for run in self.fif_files:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with open(os.devnull, 'w') as f, contextlib.redirect_stdout(f):    
+                    raw = mne.io.read_raw_fif(run, preload=False)
+            channels = raw.info['chs']
+
+            all_meg_transforms.append(raw.info['dev_head_t']) ## get transformation matrix device->head
+
+            channel_locs = []
+            channel_names = []
+            eeg_channel_names = []
+            meg_channel_names = []
+            
+            for channel in channels:
+                channel_names.append(channel['ch_name'])
+                channel_locs.append([channel['loc'][0],channel['loc'][1],channel['loc'][2]])
+            
+            meg_channel_locs = np.array(channel_locs)[self.meg_indices]
+            eeg_channel_locs = np.array(channel_locs)[self.eeg_indices]
+            
+            eeg_channel_names = np.array(channel_names)[self.eeg_indices].tolist()
+            meg_channel_names = np.array(channel_names)[self.meg_indices].tolist()
+            
+            all_eeg_channel_locs.append(eeg_channel_locs)
+            all_meg_channel_locs.append(meg_channel_locs)
+            all_eeg_channel_names.append(eeg_channel_names)
+            all_meg_channel_names.append(meg_channel_names)
+            all_channel_locs.append(channel_locs)
+            all_channel_names.append(channel_names)   
+
+        return (all_eeg_channel_locs,all_eeg_channel_names), (all_meg_channel_locs, all_meg_channel_names), (all_channel_locs,all_channel_names), all_meg_transforms
+
+    @property 
+    def emovs(self):
+        """
+        Getter for the EEG-MEG Offset Vectors (EMOVs).
+
+        This property calculates and returns the EEG-MEG Offset Vectors for each run.
+        The EMOVs are computed as the offset vectors between EEG and transformed MEG locations.
+
+        Returns:
+            list: A list of shape (n, 3) where n is the number of runs. Each element is a numpy array
+                  representing the offset vector for a specific run.
+        """
+        if not hasattr(self, '_emovs'):
+            _, _, (all_channel_locs,all_channel_names), self._meg_transforms = self._gatherSensorCoordinates()
+
+            self._emovs = []
+            
+            for run_channel_locs, meg_transform in zip(all_channel_locs,self._meg_transforms):
+                self._emovs.append(OpenFMRIDataSet.find_emov(run_channel_locs,meg_transform)) 
+            assert len(self._emovs) == self.totalRuns, "ERROR, length of list _emovs not equal to number of all runs"
+        return self._emovs
+    
+    @property
+    def meg_transforms(self):
+        """
+        Getter for the MEG transformation matrices.
+
+        This property retrieves the transformation matrices for MEG data.
+        If the transformation matrices are not already computed, it gathers
+        the sensor coordinates and extracts the transformation matrices.
+
+        Returns:
+            list: A list of length n of transformation matrices for each run.
+        """
+        if not hasattr(self, '_meg_transforms'):
+            _, _, _, self._meg_transforms = self._gatherSensorCoordinates()
+            assert len(self._meg_transforms) == self.totalRuns, "ERROR, length of list MEG transforms not equal to number of all runs"
+        
+        return self._meg_transforms
+
+    @staticmethod          
+    def transformMEGcoordinates(megCoordinates, megTransform):
+        """
+        Apply a transformation matrix to MEG coordinates.
+
+        This static method applies a given transformation matrix to the provided
+        MEG coordinates using MNE's transformation utilities.
+
+        Parameters:
+        - megCoordinates: The MEG coordinates to be transformed.
+        - megTransform: The transformation matrix (dev->head, i.e. MEG->EEG) to apply to the MEG coordinates.
+
+        Returns:
+        - Transformed MEG coordinates.
+        """
+        return mne.transforms.apply_trans(megTransform, megCoordinates)
+
     def __len__(self):
         return self.totalWindows
 
     def __getitem__(self, idx):
         runningIndex = 0
+        absRunIndex = 0
         for subjectIndex in range(len(self._participantWindowCounts)):
             for runIndex in range(len(self._participantWindowCounts[subjectIndex])):
                 count = self._participantWindowCounts[subjectIndex][runIndex]
@@ -236,9 +382,34 @@ class OpenFMRIDataSet(Dataset):
                         with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
                             raw = mne.io.read_raw_fif(fif_file, preload=False)
                     data = raw[:, window_starting_index:window_starting_index+self.windowLength_frames][0]
-                    return data[self.eeg_indices], data[self.meg_indices]
+                    ## returns tuple eeg_data, meg_data (transformed), EMOV
+                    return data[self.eeg_indices], data[self.meg_indices], self.emovs[absRunIndex] 
                 else:
                     runningIndex += count
+                    absRunIndex += 1
         # If we get here, idx is beyond all runs
         raise IndexError("Index out of range")
 
+    @staticmethod
+    def find_emov(run_channel_locs, run_meg_eeg_transform):
+        """
+        Calculate the EEG-MEG Offset Vector (EMOV).
+
+        This function computes the offset vector between a reference EEG electrode
+        and a reference MEG electrode after applying a transformation to the MEG location.
+
+        Parameters:
+        - run_channel_locs: List or array of channel locations for a specific run.
+        - run_meg_eeg_transform: Transformation matrix to be applied to the MEG location.
+
+        Returns:
+        - A numpy array representing the offset vector between the EEG and transformed MEG locations.
+        """
+        eeg_reference_electrode_index = 379
+        meg_reference_electrode_index = 236
+        
+        eeg_loc = run_channel_locs[eeg_reference_electrode_index]
+        meg_loc = run_channel_locs[meg_reference_electrode_index]
+        meg_loc = mne.transforms.apply_trans(run_meg_eeg_transform, meg_loc)
+
+        return np.array(eeg_loc) - np.array(meg_loc)
