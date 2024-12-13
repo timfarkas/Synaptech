@@ -2,6 +2,7 @@ from dataset.dataSet import OpenFMRIDataSet
 from dotenv import load_dotenv
 import os
 from torch.utils.data import DataLoader
+from models.models import EEGtoMEGUNet
 import matplotlib.pyplot as plt
 import json
 import torch
@@ -41,7 +42,7 @@ def main():
         files_percentage = run_config.get('files_percentage', 1.0)
         verbose = run_config.get('verbose', False)
         num_workers = run_config.get('num_workers', 4)
-        batch_size = run_config.get('batch_size', 512)
+        batch_size = run_config.get('batch_size', 128)
         prefetch_factor = run_config.get('prefetch_factor', 3)
         model_weights_file = run_config.get('model_weights_file', '')
         learning_rate = run_config.get('learning_rate', 0.0001)
@@ -99,7 +100,7 @@ def main():
         logger.info("Loading Data...")
 
         train_loader = None
-        test_loader = None
+        #test_loader = None
         val_loader = None
 
         logger.info("Loading OpenFMRI dataset...")
@@ -119,7 +120,7 @@ def main():
         #INIT MODEL
         logger.info("Initializing model...")
         
-        ## INIT MODEL HERE
+        model = EEGtoMEGUNet()
         
         model = model.to(device)
 
@@ -127,7 +128,7 @@ def main():
         
         
         criterion = nn.MSELoss()
-        optimizer = optim.Adam()
+        optimizer = optim.Adam(params=model.parameters())
 
         epoch_stats = None
 
@@ -162,7 +163,6 @@ def main():
                     break
 
                 # TRAINING 
-                
                 running_loss = 0.0
                 correct = 0
                 total = 0
@@ -215,14 +215,15 @@ def main():
                 
                 
                 with torch.no_grad():  # Disable gradient computation for validation
-                    progress_bar = tqdm(total=len(test_loader), desc=f"Epoch [{epoch+1}/{num_epochs}] - Validation - started {time.strftime('%H:%M')}", leave=False)
+                    progress_bar = tqdm(total=len(val_loader), desc=f"Epoch [{epoch+1}/{num_epochs}] - Validation - started {time.strftime('%H:%M')}", leave=False)
                     index = 0
 
-                    for inputs, labels in test_loader:  
+                    for inputs, labels in val_loader:  
                         if termination_requested:
                             logger.warning("Termination requested. Exiting validation loop.")
                             break
                         index += 1
+                        
                         inputs = inputs.to(device)
                         labels = labels.to(device)  
 
@@ -236,7 +237,7 @@ def main():
                     progress_bar.close()
 
                 ### calculate epoch's validation loss, accuracy, and F1 score
-                val_loss = val_running_loss / len(test_loader)
+                val_loss = val_running_loss / len(val_loader)
                 
                 val_losses.append(val_loss)
                 

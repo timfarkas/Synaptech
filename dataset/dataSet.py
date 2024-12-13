@@ -52,8 +52,8 @@ class OpenFMRIDataSet(Dataset):
         self.datasetPath = kwargs.get('datasetPath', os.path.join('/srv','synaptech_openfmri'))
         self.mode = kwargs.get('mode', 'train')
 
-        self.eegValuesType = kwargs.get('eegValuesType', np.float16)
-        self.megValuesType = kwargs.get('megValuesType', np.float16)
+        self.eegValuesType = kwargs.get('eegValuesType', np.float32)
+        self.megValuesType = kwargs.get('megValuesType', np.float32)
 
         self.logger = kwargs.get('logger', None)
         self.verbose = kwargs.get('verbose', False)
@@ -382,8 +382,21 @@ class OpenFMRIDataSet(Dataset):
                         with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
                             raw = mne.io.read_raw_fif(fif_file, preload=False)
                     data = raw[:, window_starting_index:window_starting_index+self.windowLength_frames][0]
+                    
                     ## returns tuple eeg_data, meg_data (transformed), EMOV
-                    return data[self.eeg_indices], data[self.meg_indices], self.emovs[absRunIndex] 
+                    eeg_data = data[self.eeg_indices].astype(self.eegValuesType)
+                    meg_data = data[self.meg_indices].astype(self.megValuesType)
+                    
+                    # Normalize EEG and MEG data
+                    eeg_data = (eeg_data - np.mean(eeg_data)) / np.std(eeg_data)
+                    meg_data = (meg_data - np.mean(meg_data)) / np.std(meg_data)
+                    #print(f"mean: {np.mean(meg_data)}, std: {np.std(meg_data)}")
+
+                    ### Append three EMOV rows to eeg_data
+                    emov = self.emovs[absRunIndex]
+                    emovRows = np.array([np.full(self.windowLength_frames, value) for value in emov])
+
+                    return np.concatenate((eeg_data,emovRows)), meg_data
                 else:
                     runningIndex += count
                     absRunIndex += 1
