@@ -174,27 +174,22 @@ def main():
                 
                 y_true = []
                 y_pred = []
-                
                 for batch_idx, (inputs, labels) in enumerate(train_loader):
                     if termination_requested:
                         logger.warning("Termination requested. Exiting inner training loop.")
                         break
-                    
-                    progress_bar.update(1)
-                    
-                    inputs = inputs.to(device)
-                    labels = labels.to(device)
 
-                    index += 1
-            
+                    progress_bar.update(1)
+
+                    inputs = inputs.to(device).float()
+                    labels = labels.to(device).float()
+
                     optimizer.zero_grad()
                     outputs = model(inputs)
-                    
+
                     loss = criterion(outputs, labels)
                     loss.backward()
                     optimizer.step()
-                    
-                    # Track training loss
                     running_loss += loss.item()
          
 
@@ -212,28 +207,22 @@ def main():
                 # VALIDATION 
                 model.eval()  # Set the model to evaluation mode
                 val_running_loss = 0.0
-                
-                
-                with torch.no_grad():  # Disable gradient computation for validation
+                                
+                                
+                with torch.no_grad():
                     progress_bar = tqdm(total=len(val_loader), desc=f"Epoch [{epoch+1}/{num_epochs}] - Validation - started {time.strftime('%H:%M')}", leave=False)
-                    index = 0
-
-                    for inputs, labels in val_loader:  
+                    for inputs, labels in val_loader:
                         if termination_requested:
                             logger.warning("Termination requested. Exiting validation loop.")
                             break
-                        index += 1
-                        
-                        inputs = inputs.to(device)
-                        labels = labels.to(device)  
+                        inputs = inputs.to(device).float()
+                        labels = labels.to(device).float()
 
                         outputs = model(inputs)
-
                         progress_bar.update(1)
 
                         loss = criterion(outputs, labels)
                         val_running_loss += loss.item()
-            
                     progress_bar.close()
 
                 ### calculate epoch's validation loss, accuracy, and F1 score

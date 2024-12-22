@@ -1,4 +1,5 @@
 from torch.utils.data import Dataset
+import torch  # Add this import
 import os
 import logging
 import traceback
@@ -12,7 +13,6 @@ import mne
 from dataset.utilities import DatasetDownloader
 import warnings
 import pickle as pkl
-
 
 """
 Source:
@@ -372,35 +372,33 @@ class OpenFMRIDataSet(Dataset):
         for subjectIndex in range(len(self._participantWindowCounts)):
             for runIndex in range(len(self._participantWindowCounts[subjectIndex])):
                 count = self._participantWindowCounts[subjectIndex][runIndex]
-                # The runs cover indices [runningIndex, runningIndex + count - 1]
                 if idx < runningIndex + count:
-                    # We found the correct run
                     windowIndex = idx - runningIndex
                     window_starting_index = self._participantWindowIndices[subjectIndex][runIndex][windowIndex]
                     fif_file = os.path.join(self.datasetPath, self._participantRunsArray[subjectIndex][runIndex])
                     with open(os.devnull, 'w') as devnull:
                         with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
                             raw = mne.io.read_raw_fif(fif_file, preload=False)
-                    data = raw[:, window_starting_index:window_starting_index+self.windowLength_frames][0]
-                    
-                    ## returns tuple eeg_data, meg_data (transformed), EMOV
+                    data = raw[:, window_starting_index:window_starting_index + self.windowLength_frames][0]
+
                     eeg_data = data[self.eeg_indices].astype(self.eegValuesType)
                     meg_data = data[self.meg_indices].astype(self.megValuesType)
-                    
+
                     # Normalize EEG and MEG data
                     eeg_data = (eeg_data - np.mean(eeg_data)) / np.std(eeg_data)
                     meg_data = (meg_data - np.mean(meg_data)) / np.std(meg_data)
-                    #print(f"mean: {np.mean(meg_data)}, std: {np.std(meg_data)}")
 
-                    ### Append three EMOV rows to eeg_data
                     emov = self.emovs[absRunIndex]
                     emovRows = np.array([np.full(self.windowLength_frames, value) for value in emov])
 
-                    return np.concatenate((eeg_data,emovRows)), meg_data
+                    # Convert to torch tensors
+                    eeg_tensor = torch.from_numpy(np.concatenate((eeg_data, emovRows), axis=0)).float()
+                    meg_tensor = torch.from_numpy(meg_data).float()
+
+                    return eeg_tensor, meg_tensor
                 else:
                     runningIndex += count
                     absRunIndex += 1
-        # If we get here, idx is beyond all runs
         raise IndexError("Index out of range")
 
     @staticmethod
