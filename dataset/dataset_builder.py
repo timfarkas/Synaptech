@@ -12,8 +12,8 @@ import mne
 from tqdm import tqdm  # for progress bars
 import warnings
 import torch
-
-
+import warnings
+import torch
 
 class DatasetDownloader:
     """
@@ -352,7 +352,6 @@ class DatasetPreprocesser():
         if self.verbose:
             self.logger.setLevel(logging.DEBUG)
 
-        self.processImmediately = kwargs.get('processImmediately', True)
         self.mode = str(kwargs.get('mode', "raw")).lower()
 
 
@@ -364,9 +363,6 @@ class DatasetPreprocesser():
         self._checkDatasetIntegrity(self.datasetPath)
         self._meanPoolData(self.datasetPath)
         self._makeTensorShards(self.datasetPath)
-
-        if self.processImmediately:
-            self.process()
     
     def _checkDatasetIntegrity(self, datasetPath):
         """
@@ -396,134 +392,180 @@ class DatasetPreprocesser():
         return True
     
 
-    def _meanPoolData(self, datasetPath):
+    def  _meanPoolData(self, datasetPath):
         """
         Handles mean pooling and processing of .fif files in the dataset.
-
         Parameters:
             data (numpy array): EEG/MEG data array with shape (n_channels, n_times).
             pool_size (int): The size of the pooling window. Defaults to 5.
-
         Returns:
             Processed and mean-pooled data, along with saved updates to .fif files.
         """
-        warnings.filterwarnings(
-            "ignore",
-            message=".* does not conform to MNE naming conventions.*",
-            category=RuntimeWarning,
-        )
 
+        pooled_marker = os.path.join(datasetPath, '.pooled')
+        if os.path.exists(pooled_marker):
+            return
+                
+        warnings.filterwarnings("ignore",message=".* does not conform to MNE naming conventions.*",category=RuntimeWarning,)
         logger = logging.getLogger(__name__)
-        if not logger.hasHandlers():
-            logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
         logger.setLevel(logging.INFO)
-
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
         mne.set_log_level("WARNING")
 
-        def _mean_pool(data, pool_size):
+        def _mean_pool(data, pool_size=5):
             """
             Reduces the temporal resolution by averaging every 'pool_size' samples.
-
             Parameters:
                 data (numpy array): Shape (n_channels, n_times).
                 pool_size (int): Number of samples to pool together.
-
             Returns:
                 numpy array: Mean-pooled data with shape (n_channels, n_times // pool_size).
             """
             n_channels, n_times = data.shape
-            truncated_length = n_times - (n_times % pool_size)
-            pooled_data = data[:, :truncated_length].reshape(n_channels, -1, pool_size).mean(axis=-1)
-            return pooled_data
+            remainder = n_times % pool_size
+            if remainder != 0:
+                data = data[:, : (n_times - remainder)]
+            data = data.reshape(n_channels, -1, pool_size)
+            data_pooled = data.mean(axis=-1)
+            return data_pooled
 
-        def _chunk_into_windows(data, window_size):
+        def _chunk_into_windows(data, window_size=275):
             """
             Divides data into sequential windows of a specified size.
-
             Parameters:
                 data (numpy array): Shape (n_channels, n_times_pooled).
                 window_size (int): Number of frames per window.
-
             Returns:
                 numpy array: Data reshaped to (n_windows, n_channels, window_size).
             """
             n_channels, n_times = data.shape
-            usable_length = (n_times // window_size) * window_size
-            reshaped_data = data[:, :usable_length].reshape(n_channels, -1, window_size)
-            return reshaped_data.transpose(1, 0, 2)
+            n_windows = n_times // window_size
+            usable = n_windows * window_size
+            data = data[:, :usable]
+            data = data.reshape(n_channels, n_windows, window_size)
+            data = np.transpose(data, (1, 0, 2))
+            return data
 
-        def _process_and_overwrite(fif_path, pool_size, window_size):
+        def _pool_chunk_and_overwrite(fif_path, pool_size=5, window_size=275):
             """
             Processes .fif files by mean pooling and windowing, then overwrites them.
-
             Parameters:
                 fif_path (str): Path to the .fif file.
                 pool_size (int): Size of the pooling window.
                 window_size (int): Size of the data window after pooling.
             """
-            logger.info(f"Processing: {fif_path}")
-            raw = mne.io.read_raw_fif(fif_path, preload=True)
-            data = raw.get_data()
-            pooled_data = _mean_pool(data, pool_size)
-            windows = _chunk_into_windows(pooled_data, window_size)
+            try:
+                logger.info(f"Processing & Overwriting: {fif_path}")
+                raw_original = mne.io.read_raw_fif(fif_path, preload=True)
+                original_data = raw_original.get_data()
+                original_sf = raw_original.info['sfreq']
+            except Exception as e:
+                logger.error(f"Failed to read {fif_path}")
+                logger.error(f"Error: {str(e)}")
+                return False
 
-            if windows.size > 0:
-                flattened_data = windows.transpose(1, 0, 2).reshape(data.shape[0], -1)
-            else:
-                flattened_data = np.zeros((data.shape[0], 0), dtype=np.float32)
+            try:
+                # Mean pool
+                data_pooled = _mean_pool(original_data, pool_size=pool_size)
+                
+                # Break into windows
+                windows = _chunk_into_windows(data_pooled, window_size=window_size)
+                n_windows = windows.shape[0]
 
-            logger.info(
-                f"Shapes - Original: {data.shape}, Pooled: {pooled_data.shape}, "
-                f"Flattened: {flattened_data.shape}"
-            )
+                # Flatten windows
+                if n_windows > 0:
+                    flattened_data = windows.transpose(1, 0, 2).reshape(original_data.shape[0], -1)
+                else:
+                    flattened_data = np.zeros((original_data.shape[0], 0), dtype=np.float32)
 
-            new_info = mne.create_info(
-                ch_names=raw.ch_names,
-                sfreq=raw.info['sfreq'] / pool_size,
-                ch_types=raw.get_channel_types(),
-            )
+                logger.info(
+                    f"  Shapes:\n"
+                    f"    Original: {original_data.shape},\n"
+                    f"    After pooling: {data_pooled.shape},\n"
+                    f"    #windows of {window_size} frames: {n_windows},\n"
+                    f"    Final 'flattened' shape: {flattened_data.shape}."
+                )
 
-            processed_raw = mne.io.RawArray(flattened_data, new_info)
-            processed_raw.set_meas_date(raw.info['meas_date'])
-            processed_raw.info['bads'] = raw.info['bads']
-            processed_raw.save(fif_path, overwrite=True)
+                ch_names = raw_original.ch_names
+                ch_types = raw_original.get_channel_types()
+                new_info = mne.create_info(
+                    ch_names=ch_names, 
+                    sfreq=(original_sf / pool_size), 
+                    ch_types=ch_types
+                )
+                
+                new_raw = mne.io.RawArray(flattened_data, new_info)
+                new_raw.set_meas_date(raw_original.info['meas_date'])
+                new_raw.info['bads'] = list(raw_original.info['bads'])
 
-        def _process_dataset(dataset_path, pool_size, window_size):
+                new_raw.save(fif_path, overwrite=True)
+                return True
+
+            except Exception as e:
+                logger.error(f"Error processing {fif_path}")
+                logger.error(f"Error: {str(e)}")
+                return False
+
+        def _process_all(dataset_path="/srv/synaptech_openmri_1"):
             """
             Processes all .fif files in a dataset, organized by train/val/test.
-
             Parameters:
                 dataset_path (str): Path to the dataset root.
                 pool_size (int): Pooling window size.
                 window_size (int): Window size after pooling.
             """
-            logger.info(f"Processing dataset at: {dataset_path}")
-
+            processed_files = []
+            failed_files = []
+            
             for mode in ["train", "val", "test"]:
                 mode_path = os.path.join(dataset_path, mode)
                 if not os.path.isdir(mode_path):
                     logger.warning(f"Skipping non-existent folder: {mode_path}")
                     continue
 
-                for subject in sorted(os.listdir(mode_path)):
+                subjects = sorted(os.listdir(mode_path))
+                logger.info(f"[{mode}] Found {len(subjects)} potential items in: {mode_path}")
+
+                for subject in subjects:
                     subject_path = os.path.join(mode_path, subject)
                     if not os.path.isdir(subject_path):
                         continue
 
-                    for run_file in [f for f in os.listdir(subject_path) if f.endswith('.fif')]:
-                        _process_and_overwrite(os.path.join(subject_path, run_file), pool_size, window_size)
+                    fif_files = [f for f in os.listdir(subject_path) if f.endswith('.fif')]
+                    if not fif_files:
+                        logger.info(f"No .fif files found for subject {subject}, skipping.")
+                        continue
 
-            logger.info("Dataset processing complete.")
+                    logger.info(f"Subject {subject} has {len(fif_files)} .fif runs.")
+                    for run_file in fif_files:
+                        fif_path = os.path.join(subject_path, run_file)
+                        if _pool_chunk_and_overwrite(fif_path, pool_size=5, window_size=275):
+                            processed_files.append(fif_path)
+                        else:
+                            failed_files.append(fif_path)
 
-        logger.info("Mean pooling and dataset processing started.")
-        _process_dataset(datasetPath, pool_size=5, window_size=275) 
-        logger.info("Mean pooling and dataset processing finished.")
+            pooled_marker = os.path.join(dataset_path, '.pooled')
+            with open(pooled_marker, 'w') as marker_file:
+                marker_file.write('')
+            
+            if failed_files:
+                logger.warning(f"Processing completed with {len(failed_files)} corrupted files skipped")
 
+        _process_all(datasetPath)
 
 
     def _makeTensorShards(self, datasetPath):
-        warnings.filterwarnings("ignore", message=".* does not conform to MNE naming conventions.*", category=RuntimeWarning)
 
+        pooled_marker = os.path.join(datasetPath, '.sharded')
+        if os.path.exists(pooled_marker):
+            return
+                
+
+        warnings.filterwarnings("ignore",message=".* does not conform to MNE naming conventions.*",category=RuntimeWarning,)
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.INFO)
         if not logger.handlers:
@@ -533,6 +575,17 @@ class DatasetPreprocesser():
             logger.addHandler(handler)
 
         mne.set_log_level("WARNING")
+
+        def _safe_read_fif(fif_path):
+            """
+            Safely read a .fif file, returning None if corrupted
+            """
+            try:
+                raw = mne.io.read_raw_fif(fif_path, preload=True)
+                return raw
+            except Exception as e:
+                logger.error(f"Failed to read {fif_path}: {str(e)}")
+                return None
 
         def _collect_global_stats(dataset_path="/srv/synaptech_openfmri"):
             """
@@ -548,19 +601,17 @@ class DatasetPreprocesser():
                 "mag_mean": np.array of shape [n_mag_channels],
                 "mag_std":  np.array of shape [n_mag_channels]
             }
-
-            We'll assume channel ordering is consistent across files and subjects.
-            If not, you'd need a more robust approach (matching channel names, etc.).
             """
             logger.info("Collecting global channel stats (EEG & MAG) across the entire dataset...")
 
+            processed_files = []
+            failed_files = []
+
             eeg_channel_count = None
             mag_channel_count = None
-
             sums_eeg = None
             sums_sqr_eeg = None
             num_samples_eeg = 0
-
             sums_mag = None
             sums_sqr_mag = None
             num_samples_mag = 0
@@ -581,52 +632,60 @@ class DatasetPreprocesser():
                         run_path = os.path.join(subject_path, run_file)
                         logger.debug(f"(Stats) Loading {run_path}")
 
-                        raw = mne.io.read_raw_fif(run_path, preload=True)
-                        data_all = raw.get_data()  # shape: [n_channels, n_times]
+                        raw = _safe_read_fif(run_path)
+                        if raw is None:
+                            failed_files.append(run_path)
+                            continue
 
-                        # EEG
-                        eeg_indices = mne.pick_types(raw.info, meg=False, eeg=True)
-                        if len(eeg_indices) > 0:
-                            # shape => [n_eeg, n_times]
-                            eeg_data = data_all[eeg_indices, :]
-                            n_eeg_ch, n_times = eeg_data.shape
+                        try:
+                            data_all = raw.get_data()
 
-                            if eeg_channel_count is None:
-                                eeg_channel_count = n_eeg_ch
-                                # Initialize accumulators
-                                sums_eeg = np.zeros(eeg_channel_count, dtype=np.float64)
-                                sums_sqr_eeg = np.zeros(eeg_channel_count, dtype=np.float64)
+                            # EEG
+                            eeg_indices = mne.pick_types(raw.info, meg=False, eeg=True)
+                            if len(eeg_indices) > 0:
+                                eeg_data = data_all[eeg_indices, :]
+                                n_eeg_ch, n_times = eeg_data.shape
 
-                            # Check that the number of channels matches the first assumption
-                            if n_eeg_ch != eeg_channel_count:
-                                logger.error(f"EEG channel count mismatch: {n_eeg_ch} vs. {eeg_channel_count}")
-                                continue
+                                if eeg_channel_count is None:
+                                    eeg_channel_count = n_eeg_ch
+                                    sums_eeg = np.zeros(eeg_channel_count, dtype=np.float64)
+                                    sums_sqr_eeg = np.zeros(eeg_channel_count, dtype=np.float64)
 
-                            # Accumulate
-                            sums_eeg += np.sum(eeg_data, axis=1)
-                            sums_sqr_eeg += np.sum(eeg_data**2, axis=1)
-                            num_samples_eeg += n_times
+                                if n_eeg_ch != eeg_channel_count:
+                                    logger.error(f"EEG channel count mismatch: {n_eeg_ch} vs. {eeg_channel_count}")
+                                    continue
 
-                        # MAG
-                        mag_indices = mne.pick_types(raw.info, meg='mag', eeg=False)
-                        if len(mag_indices) > 0:
-                            mag_data = data_all[mag_indices, :]
-                            n_mag_ch, n_times = mag_data.shape
+                                sums_eeg += np.sum(eeg_data, axis=1)
+                                sums_sqr_eeg += np.sum(eeg_data**2, axis=1)
+                                num_samples_eeg += n_times
 
-                            if mag_channel_count is None:
-                                mag_channel_count = n_mag_ch
-                                sums_mag = np.zeros(mag_channel_count, dtype=np.float64)
-                                sums_sqr_mag = np.zeros(mag_channel_count, dtype=np.float64)
+                            # MAG
+                            mag_indices = mne.pick_types(raw.info, meg='mag', eeg=False)
+                            if len(mag_indices) > 0:
+                                mag_data = data_all[mag_indices, :]
+                                n_mag_ch, n_times = mag_data.shape
 
-                            if n_mag_ch != mag_channel_count:
-                                logger.error(f"MAG channel count mismatch: {n_mag_ch} vs. {mag_channel_count}")
-                                continue
+                                if mag_channel_count is None:
+                                    mag_channel_count = n_mag_ch
+                                    sums_mag = np.zeros(mag_channel_count, dtype=np.float64)
+                                    sums_sqr_mag = np.zeros(mag_channel_count, dtype=np.float64)
 
-                            sums_mag += np.sum(mag_data, axis=1)
-                            sums_sqr_mag += np.sum(mag_data**2, axis=1)
-                            num_samples_mag += n_times
+                                if n_mag_ch != mag_channel_count:
+                                    logger.error(f"MAG channel count mismatch: {n_mag_ch} vs. {mag_channel_count}")
+                                    continue
 
-            # Compute means & std for EEG
+                                sums_mag += np.sum(mag_data, axis=1)
+                                sums_sqr_mag += np.sum(mag_data**2, axis=1)
+                                num_samples_mag += n_times
+
+                            processed_files.append(run_path)
+
+                        except Exception as e:
+                            logger.error(f"Error processing {run_path}: {str(e)}")
+                            failed_files.append(run_path)
+                            continue
+
+            # Compute statistics
             if eeg_channel_count is not None and num_samples_eeg > 0:
                 mean_eeg = sums_eeg / num_samples_eeg
                 e_x2 = sums_sqr_eeg / num_samples_eeg
@@ -637,7 +696,6 @@ class DatasetPreprocesser():
                 mean_eeg = np.array([])
                 std_eeg = np.array([])
 
-            # Compute means & std for MAG
             if mag_channel_count is not None and num_samples_mag > 0:
                 mean_mag = sums_mag / num_samples_mag
                 e_x2 = sums_sqr_mag / num_samples_mag
@@ -648,12 +706,19 @@ class DatasetPreprocesser():
                 mean_mag = np.array([])
                 std_mag = np.array([])
 
-            logger.info("Done gathering global stats.")
+            logger.info(f"Stats collection complete. Processed {len(processed_files)} files.")
+            if failed_files:
+                logger.warning(f"Failed to process {len(failed_files)} files:")
+                for f in failed_files:
+                    logger.warning(f"  - {f}")
+
             return {
                 "eeg_mean": mean_eeg,
                 "eeg_std": std_eeg,
                 "mag_mean": mean_mag,
                 "mag_std": std_mag,
+                "processed_files": processed_files,
+                "failed_files": failed_files
             }
 
         def _make_3d_windows(data, window_size=275, allow_padding=False, mode="EEG"):
@@ -687,7 +752,6 @@ class DatasetPreprocesser():
 
             return torch.from_numpy(blocks)
 
-
         def _apply_zscore_and_save_shards(dataset_path, stats, window_size=275, shard_output_dir=None, allow_padding=False):
             """
             Pass 2:
@@ -697,11 +761,13 @@ class DatasetPreprocesser():
             """
             logger.info(f"Applying z-score normalization & saving shards in float16. Using window_size={window_size}")
 
-            # Unpack stats
             mean_eeg = stats["eeg_mean"]
             std_eeg = stats["eeg_std"]
             mean_mag = stats["mag_mean"]
             std_mag = stats["mag_std"]
+
+            processed_files = []
+            failed_files = []
 
             for mode in ["train", "val", "test"]:
                 mode_path = os.path.join(dataset_path, mode)
@@ -719,62 +785,75 @@ class DatasetPreprocesser():
                         run_path = os.path.join(subject_path, run_file)
                         logger.info(f"[Z-score pass] Loading {run_path}")
 
-                        raw = mne.io.read_raw_fif(run_path, preload=True)
-                        data_all = raw.get_data()
+                        # Skip if file was previously identified as corrupted
+                        if run_path in stats.get('failed_files', []):
+                            logger.warning(f"Skipping previously identified corrupted file: {run_path}")
+                            failed_files.append(run_path)
+                            continue
 
-                        # EEG
-                        eeg_indices = mne.pick_types(raw.info, meg=False, eeg=True)
-                        eeg_data = data_all[eeg_indices, :]
-                        if eeg_data.size > 0 and len(eeg_indices) == len(mean_eeg):
-                            # Z-score each channel
-                            # shape => [n_eeg, n_times]
-                            for ch_i in range(len(eeg_indices)):
-                                eeg_data[ch_i, :] = (eeg_data[ch_i, :] - mean_eeg[ch_i]) / std_eeg[ch_i]
+                        # Safely read the file
+                        raw = _safe_read_fif(run_path)
+                        if raw is None:
+                            failed_files.append(run_path)
+                            continue
 
-                            shard_eeg = _make_3d_windows(eeg_data, window_size=window_size, allow_padding=allow_padding, mode="EEG")
-                            if shard_eeg is not None:
-                                if shard_output_dir:
-                                    out_dir = os.path.join(shard_output_dir, mode, subject)
-                                else:
-                                    out_dir = os.path.join(subject_path, "EEG_shard_zscored")
-                                os.makedirs(out_dir, exist_ok=True)
+                        try:
+                            data_all = raw.get_data()
 
-                                name_base, _ = os.path.splitext(run_file)
-                                out_fname = f"{name_base}_eeg.pt"
-                                out_path = os.path.join(out_dir, out_fname)
+                            # EEG
+                            eeg_indices = mne.pick_types(raw.info, meg=False, eeg=True)
+                            eeg_data = data_all[eeg_indices, :]
+                            if eeg_data.size > 0 and len(eeg_indices) == len(mean_eeg):
+                                for ch_i in range(len(eeg_indices)):
+                                    eeg_data[ch_i, :] = (eeg_data[ch_i, :] - mean_eeg[ch_i]) / std_eeg[ch_i]
 
-                                # Convert to half
-                                shard_eeg_fp16 = shard_eeg.half()
-                                torch.save(shard_eeg_fp16, out_path)
-                                logger.info(f"Z-scored EEG => shape={tuple(shard_eeg_fp16.shape)}: {out_path}")
-                        else:
-                            logger.warning(f"EEG channel mismatch or no EEG data for {run_file}.")
+                                shard_eeg = _make_3d_windows(eeg_data, window_size=window_size, 
+                                                        allow_padding=allow_padding, mode="EEG")
+                                if shard_eeg is not None:
+                                    if shard_output_dir:
+                                        out_dir = os.path.join(shard_output_dir, mode, subject)
+                                    else:
+                                        out_dir = os.path.join(subject_path, "EEG_shards")
+                                    os.makedirs(out_dir, exist_ok=True)
 
-                        # MAG
-                        mag_indices = mne.pick_types(raw.info, meg='mag', eeg=False)
-                        mag_data = data_all[mag_indices, :]
-                        if mag_data.size > 0 and len(mag_indices) == len(mean_mag):
-                            for ch_i in range(len(mag_indices)):
-                                mag_data[ch_i, :] = (mag_data[ch_i, :] - mean_mag[ch_i]) / std_mag[ch_i]
+                                    name_base, _ = os.path.splitext(run_file)
+                                    out_fname = f"{name_base}_eeg.pt"
+                                    out_path = os.path.join(out_dir, out_fname)
 
-                            shard_mag = _make_3d_windows(mag_data, window_size=window_size, allow_padding=allow_padding, mode="MAG")
-                            if shard_mag is not None:
-                                if shard_output_dir:
-                                    out_dir = os.path.join(shard_output_dir, mode, subject)
-                                else:
-                                    out_dir = os.path.join(subject_path, "MAG_shard_zscored")
-                                os.makedirs(out_dir, exist_ok=True)
+                                    shard_eeg_fp16 = shard_eeg.half()
+                                    torch.save(shard_eeg_fp16, out_path)
+                                    logger.info(f"Z-scored EEG => shape={tuple(shard_eeg_fp16.shape)}: {out_path}")
 
-                                name_base, _ = os.path.splitext(run_file)
-                                out_fname = f"{name_base}_mag.pt"
-                                out_path = os.path.join(out_dir, out_fname)
+                            # MAG
+                            mag_indices = mne.pick_types(raw.info, meg='mag', eeg=False)
+                            mag_data = data_all[mag_indices, :]
+                            if mag_data.size > 0 and len(mag_indices) == len(mean_mag):
+                                for ch_i in range(len(mag_indices)):
+                                    mag_data[ch_i, :] = (mag_data[ch_i, :] - mean_mag[ch_i]) / std_mag[ch_i]
 
-                                shard_mag_fp16 = shard_mag.half()
-                                torch.save(shard_mag_fp16, out_path)
-                                logger.info(f"Z-scored MAG => shape={tuple(shard_mag_fp16.shape)}: {out_path}")
-                        else:
-                            logger.warning(f"MAG channel mismatch or no MAG data for {run_file}.")
+                                shard_mag = _make_3d_windows(mag_data, window_size=window_size, 
+                                                        allow_padding=allow_padding, mode="MAG")
+                                if shard_mag is not None:
+                                    if shard_output_dir:
+                                        out_dir = os.path.join(shard_output_dir, mode, subject)
+                                    else:
+                                        out_dir = os.path.join(subject_path, "MAG_shards")
+                                    os.makedirs(out_dir, exist_ok=True)
 
+                                    name_base, _ = os.path.splitext(run_file)
+                                    out_fname = f"{name_base}_mag.pt"
+                                    out_path = os.path.join(out_dir, out_fname)
+
+                                    shard_mag_fp16 = shard_mag.half()
+                                    torch.save(shard_mag_fp16, out_path)
+                                    logger.info(f"Z-scored MAG => shape={tuple(shard_mag_fp16.shape)}: {out_path}")
+
+                            processed_files.append(run_path)
+
+                        except Exception as e:
+                            logger.error(f"Error processing {run_path}: {str(e)}")
+                            failed_files.append(run_path)
+                            continue
 
         def _main_zscore_shard_pipeline(dataset_path="/srv/synaptech_openfmri", window_size=275, shard_output_dir=None):
             """
@@ -789,11 +868,20 @@ class DatasetPreprocesser():
                         f"{stats['mag_mean'].shape}, {stats['mag_std'].shape}")
 
             logger.info("=== PASS 2: Applying z-score & saving shards ===")
-            _apply_zscore_and_save_shards(dataset_path=dataset_path,
-                                        stats=stats,
-                                        window_size=window_size,
-                                        shard_output_dir=shard_output_dir,
-                                        allow_padding=False)
+            results = _apply_zscore_and_save_shards(
+                dataset_path=dataset_path,
+                stats=stats,
+                window_size=window_size,
+                shard_output_dir=shard_output_dir,
+                allow_padding=False
+            )
+            
             logger.info("Z-score pipeline complete.")
+
+            pooled_marker = os.path.join(dataset_path, '.sharded')
+            with open(pooled_marker, 'w') as marker_file:
+                marker_file.write('')
+            
+            return results
 
         _main_zscore_shard_pipeline(dataset_path=datasetPath, window_size=275, shard_output_dir=None)
