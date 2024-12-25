@@ -1,4 +1,4 @@
-from dataset.dataSet import OpenFMRIDataSet
+from dataset.data_loader import OpenFMRIDataSet
 from dotenv import load_dotenv
 import os
 from torch.utils.data import DataLoader
