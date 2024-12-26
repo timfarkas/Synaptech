@@ -16,7 +16,7 @@ import sys
 import os
 import time
 import wandb
-
+from dataset.shard_loader import ShardDataLoader
 
 # Flag to indicate if termination has been requested
 termination_requested = False
@@ -110,12 +110,17 @@ def main():
 
 
         ### init dataset this will automatically download and preprocess the dataset if run for the first time
-        train_dataset = OpenFMRIDataSet(mode='train',datasetPath=dataset_path)
-        val_dataset = OpenFMRIDataSet(mode='val',datasetPath=dataset_path,loadData=False,logger=logger,verbose=verbose)
-        test_dataset = OpenFMRIDataSet(mode='test',datasetPath=dataset_path,loadData=False,logger=logger,verbose=verbose) 
+        # train_dataset = OpenFMRIDataSet(mode='train',datasetPath=dataset_path)
+        # val_dataset = OpenFMRIDataSet(mode='val',datasetPath=dataset_path,loadData=False,logger=logger,verbose=verbose)
+        # test_dataset = OpenFMRIDataSet(mode='test',datasetPath=dataset_path,loadData=False,logger=logger,verbose=verbose) 
         
-        train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
-        val_loader = DataLoader(val_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
+        # train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
+        # val_loader = DataLoader(val_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
+
+        logger.info("Initializing ShardDataLoader...")
+        shard_data_loader_train = ShardDataLoader(dataset_path=dataset_path, mode='train', logger=logger, verbose=verbose)
+        shard_data_loader_val = ShardDataLoader(dataset_path=dataset_path, mode='val', logger=logger, verbose=verbose)
+        sample_length = 275 
 
         #INIT MODEL
         logger.info("Initializing model...")
@@ -142,6 +147,7 @@ def main():
         y_true = []
         y_scores = []
 
+
         ### Load initial weights file
         if not os.path.isfile(initialWeightsFile) and weight_file_set:
             logger.error(f"Provided model weights file {initialWeightsFile} does not exist. Exiting.")
@@ -157,23 +163,29 @@ def main():
 
         logger.info(f"Training for {num_epochs} epochs...")
         try:
+                    
             for epoch in range(num_epochs):
                 if termination_requested:
                     logger.warning("Termination requested. Exiting outer training loop.")
                     break
 
+                # Prepare DataLoaders for this epoch
+                logger.info("Preparing training data for epoch...")
+                train_dataset = shard_data_loader_train.prepare_epoch_dataset(sample_length=sample_length)
+                train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
+
+                logger.info("Preparing validation data for epoch...")
+                val_dataset = shard_data_loader_val.prepare_epoch_dataset(sample_length=sample_length)
+                val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
+
+                # Training loop as before, using the new train_loader and val_loader
+
                 # TRAINING 
                 running_loss = 0.0
-                correct = 0
-                total = 0
-                index = 0
-                
                 model.train()  
-                
+
                 progress_bar = tqdm(total=len(train_loader), desc=f"Epoch [{epoch+1}/{num_epochs}] - Training - started {time.strftime('%H:%M')}", leave=True)
-                
-                y_true = []
-                y_pred = []
+
                 for batch_idx, (inputs, labels) in enumerate(train_loader):
                     if termination_requested:
                         logger.warning("Termination requested. Exiting inner training loop.")
@@ -184,6 +196,10 @@ def main():
                     inputs = inputs.to(device).float()
                     labels = labels.to(device).float()
 
+
+                    print(f"Model is on device: {next(model.parameters()).device}")
+                    print(f"Inputs are on device: {inputs.device}")
+
                     optimizer.zero_grad()
                     outputs = model(inputs)
 
@@ -191,7 +207,6 @@ def main():
                     loss.backward()
                     optimizer.step()
                     running_loss += loss.item()
-         
 
                     # Log batch metrics to W&B
                     wandb.log({
@@ -199,16 +214,16 @@ def main():
                         'batch_loss': loss.item(),
                     })
 
-                ### calculate epoch's training loss
+                progress_bar.close()
+
+                # Calculate epoch's training loss
                 train_loss = running_loss / len(train_loader)
                 train_losses.append(train_loss)
-                
-                
+
                 # VALIDATION 
                 model.eval()  # Set the model to evaluation mode
                 val_running_loss = 0.0
-                                
-                                
+
                 with torch.no_grad():
                     progress_bar = tqdm(total=len(val_loader), desc=f"Epoch [{epoch+1}/{num_epochs}] - Validation - started {time.strftime('%H:%M')}", leave=False)
                     for inputs, labels in val_loader:
@@ -225,11 +240,9 @@ def main():
                         val_running_loss += loss.item()
                     progress_bar.close()
 
-                ### calculate epoch's validation loss, accuracy, and F1 score
+                # Calculate epoch's validation loss
                 val_loss = val_running_loss / len(val_loader)
-                
                 val_losses.append(val_loss)
-                
 
                 # Log epoch metrics to W&B
                 wandb.log({
@@ -237,6 +250,7 @@ def main():
                     'train_loss': train_loss,
                     'val_loss': val_loss
                 })
+
 
                 # Log and save training history and weights
                 logger.info(f"EPOCH {epoch+1}: Val Loss: {val_loss:.4f}")
