@@ -10,7 +10,7 @@ import re
 import numpy as np
 import contextlib
 import mne
-from dataset.utilities import DatasetDownloader
+from dataset.dataset_builder import DatasetDownloader
 import warnings
 import pickle as pkl
 

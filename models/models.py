@@ -2,14 +2,13 @@ import torch
 import torch.nn as nn
 from torch.nn.functional import relu
 
-
 class EEGtoMEGUNet(nn.Module):
     def __init__(self):
         super().__init__()
         
         # Encoder 
-        # First Level - Modified to preserve temporal dimension better
-        self.e11 = nn.Conv2d(1, 128, kernel_size=(77, 3), padding=(0, 1), stride=(1, 1))    
+        # First Level - kernel size to match input channels
+        self.e11 = nn.Conv2d(1, 128, kernel_size=(74, 3), padding=(0, 1), stride=(1, 1))    
         self.e12 = nn.Conv2d(128, 128, kernel_size=(1, 3), padding=(0, 1))   
         self.pool1 = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))         
 
@@ -23,7 +22,7 @@ class EEGtoMEGUNet(nn.Module):
         self.e32 = nn.Conv2d(512, 512, kernel_size=(1, 3), padding=(0, 1))   
         self.pool3 = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))        
 
-        # Bridge - Adjusted sizes based on actual tensor shapes
+        # Bridge 
         self.flatten = nn.Flatten()
         self.bridge_mlp = nn.Sequential(
             nn.Linear(17408, 4096),  # 17408 = 512 * 1 * 34
@@ -82,24 +81,29 @@ class EEGtoMEGUNet(nn.Module):
         xb2 = self.unflatten(xb)
         xb2 = self.dropout(xb2)
 
-
         # Decoder with size matching
         xu1 = self.upconv1(xb2)
-        xu1 = torch.nn.functional.pad(xu1, [0, xe32.size(-1) - xu1.size(-1), 0, 0])
+        if xu1.size(-1) != xe32.size(-1): # ABSOLUTE ORGY. TO BE FIXED !!!
+            diff = xe32.size(-1) - xu1.size(-1) # ABSOLUTE ORGY. TO BE FIXED !!!
+            xu1 = torch.nn.functional.pad(xu1, [0, diff, 0, 0]) # ABSOLUTE ORGY. TO BE FIXED !!!
         xu11 = torch.cat([xu1, xe32], dim=1)
         xd11 = self.relu(self.d11(xu11))
         xd12 = self.relu(self.d12(xd11))
         xd12 = self.dropout(xd12)
 
         xu2 = self.upconv2(xd12)
-        xu2 = torch.nn.functional.pad(xu2, [0, xe22.size(-1) - xu2.size(-1), 0, 0])
+        if xu2.size(-1) != xe22.size(-1): # ABSOLUTE ORGY. TO BE FIXED !!!
+            diff = xe22.size(-1) - xu2.size(-1) # ABSOLUTE ORGY. TO BE FIXED !!!
+            xu2 = torch.nn.functional.pad(xu2, [0, diff, 0, 0]) # ABSOLUTE ORGY. TO BE FIXED !!!
         xu22 = torch.cat([xu2, xe22], dim=1)
         xd21 = self.relu(self.d21(xu22))
         xd22 = self.relu(self.d22(xd21))
         xd22 = self.dropout(xd22)
 
         xu3 = self.upconv3(xd22)
-        xu3 = torch.nn.functional.pad(xu3, [0, xe12.size(-1) - xu3.size(-1), 0, 0])
+        if xu3.size(-1) != xe12.size(-1): # ABSOLUTE ORGY. TO BE FIXED !!!
+            diff = xe12.size(-1) - xu3.size(-1) # ABSOLUTE ORGY. TO BE FIXED !!!
+            xu3 = torch.nn.functional.pad(xu3, [0, diff, 0, 0]) # ABSOLUTE ORGY. TO BE FIXED !!!
         xu33 = torch.cat([xu3, xe12], dim=1)
         xd31 = self.relu(self.d31(xu33))
         xd32 = self.relu(self.d32(xd31))
