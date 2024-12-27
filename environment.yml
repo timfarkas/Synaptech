@@ -1,9 +1,10 @@
 name: synaptech_env
 channels:
-  - https://repo.anaconda.com/pkgs/main
-  - https://repo.anaconda.com/pkgs/r
+  - conda-forge
+  - pytorch
+  - defaults
 dependencies:
-  - mne
+  - mne>=1.0
   - numpy
   - python=3.10
   - pytorch
@@ -12,4 +13,5 @@ dependencies:
   - torchvision
   - ipykernel
   - pandas
-prefix: /home/azureuser/miniconda3/envs/synaptech_env
+  - python-dotenv 
+  - wandb

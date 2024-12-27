@@ -1,4 +1,3 @@
-from dataset.data_loader import OpenFMRIDataSet
 from dotenv import load_dotenv
 import os
 from torch.utils.data import DataLoader
@@ -13,10 +12,10 @@ from tqdm import tqdm
 import traceback
 import signal
 import sys
-import os
 import time
 import wandb
 from dataset.shard_loader import ShardDataLoader
+import re  # Import the re module for regular expressions
 
 # Flag to indicate if termination has been requested
 termination_requested = False
@@ -27,7 +26,6 @@ def signal_handler(signum, frame):
     termination_requested = True
     raise KeyboardInterrupt 
 
-
 def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -37,7 +35,46 @@ def main():
         training_runs = json.load(f)
 
     for run_config in training_runs:
-        run_name = run_config.get('name', 'default_run')
+        # Obtain base run name
+        base_run_name = run_config.get('name', 'default_run')
+
+        # Prepare the runs directory
+        runs_directory = 'runs'
+        os.makedirs(runs_directory, exist_ok=True)
+
+        # Get list of existing run directories
+        existing_run_dirs = [d for d in os.listdir(runs_directory) if os.path.isdir(os.path.join(runs_directory, d))]
+
+        # Initialize run_name
+        run_name = base_run_name
+
+        # Find existing runs with the same base name
+        matching_runs = [d for d in existing_run_dirs if d.startswith(base_run_name)]
+
+        if matching_runs:
+            # Extract numerical suffixes
+            suffixes = []
+            for run_dir in matching_runs:
+                # Match pattern: base_run_name followed by optional digits
+                match = re.match(rf'^{re.escape(base_run_name)}(\d*)$', run_dir)
+                if match:
+                    suffix = match.group(1)
+                    if suffix == '':
+                        suffix_int = 0
+                    else:
+                        suffix_int = int(suffix)
+                    suffixes.append(suffix_int)
+            new_suffix = max(suffixes) + 1
+            if new_suffix == 0:
+                run_name = base_run_name
+            else:
+                run_name = f"{base_run_name}{new_suffix}"
+        else:
+            run_name = base_run_name
+
+        # Update run_config['name'] with adjusted run_name
+        run_config['name'] = run_name
+
         num_epochs = run_config.get('epochs', 10)
         files_percentage = run_config.get('files_percentage', 1.0)
         verbose = run_config.get('verbose', False)
@@ -51,13 +88,13 @@ def main():
 
         if breakRun:
             break
-        
+
         # Initialize W&B run
         wandb.init(project="Synaptech", 
                    name=run_name, 
                    config=run_config)
 
-        log_folder_name = f'runs/{run_name}'
+        log_folder_name = f'{runs_directory}/{run_name}'
         os.makedirs(log_folder_name, exist_ok=True)
 
         weight_file_set = False
@@ -65,7 +102,7 @@ def main():
         if model_weights_file:
             initialWeightsFile = model_weights_file
             weight_file_set = True
-        
+
         def printConfig():
             logger.info("INITIALIZING TRAINING RUN")
             logger.info("Run Configuration:")
@@ -78,19 +115,19 @@ def main():
             logger.info(f"batch_size: {batch_size}")
             logger.info(f"num_workers: {num_workers}")
             logger.info(f"prefetch_factor: {prefetch_factor}")
-            
+
         logging.basicConfig(filename=f'{log_folder_name}/training_log.log', level=logging.INFO, 
                             format='%(asctime)s - %(levelname)s - %(message)s')
-        
+
         logger = logging.getLogger()
-        
-        ### suppresses annoying useless warnings
+
+        # Suppress warnings from matplotlib font manager
         logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 
         if verbose:
             logger.setLevel(logging.DEBUG)
 
-        ## print config
+        # Print configuration
         printConfig()
 
         logger.info("Checking device..")
@@ -100,38 +137,24 @@ def main():
         logger.info("Loading Data...")
 
         train_loader = None
-        #test_loader = None
         val_loader = None
 
         logger.info("Loading OpenFMRI dataset...")
-        
+
         load_dotenv()
         dataset_path = os.getenv("DATASET_PATH")
-
-
-        ### init dataset this will automatically download and preprocess the dataset if run for the first time
-        # train_dataset = OpenFMRIDataSet(mode='train',datasetPath=dataset_path)
-        # val_dataset = OpenFMRIDataSet(mode='val',datasetPath=dataset_path,loadData=False,logger=logger,verbose=verbose)
-        # test_dataset = OpenFMRIDataSet(mode='test',datasetPath=dataset_path,loadData=False,logger=logger,verbose=verbose) 
-        
-        # train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
-        # val_loader = DataLoader(val_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
 
         logger.info("Initializing ShardDataLoader...")
         shard_data_loader_train = ShardDataLoader(dataset_path=dataset_path, mode='train', logger=logger, verbose=verbose)
         shard_data_loader_val = ShardDataLoader(dataset_path=dataset_path, mode='val', logger=logger, verbose=verbose)
         sample_length = 275 
 
-        #INIT MODEL
+        # Initialize model
         logger.info("Initializing model...")
-        
         model = EEGtoMEGUNet()
-        
         model = model.to(device)
 
         logger.info("Initializing loss function & optimizer...")
-        
-        
         criterion = nn.MSELoss()
         optimizer = optim.Adam(params=model.parameters())
 
@@ -147,8 +170,7 @@ def main():
         y_true = []
         y_scores = []
 
-
-        ### Load initial weights file
+        # Load initial weights file
         if not os.path.isfile(initialWeightsFile) and weight_file_set:
             logger.error(f"Provided model weights file {initialWeightsFile} does not exist. Exiting.")
             sys.exit(1)
@@ -163,7 +185,6 @@ def main():
 
         logger.info(f"Training for {num_epochs} epochs...")
         try:
-                    
             for epoch in range(num_epochs):
                 if termination_requested:
                     logger.warning("Termination requested. Exiting outer training loop.")
@@ -178,9 +199,7 @@ def main():
                 val_dataset = shard_data_loader_val.prepare_epoch_dataset(sample_length=sample_length)
                 val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=num_workers, prefetch_factor=prefetch_factor, pin_memory=device.type == 'cuda')
 
-                # Training loop as before, using the new train_loader and val_loader
-
-                # TRAINING 
+                # Training loop
                 running_loss = 0.0
                 model.train()  
 
@@ -195,10 +214,6 @@ def main():
 
                     inputs = inputs.to(device).float()
                     labels = labels.to(device).float()
-
-
-                    print(f"Model is on device: {next(model.parameters()).device}")
-                    print(f"Inputs are on device: {inputs.device}")
 
                     optimizer.zero_grad()
                     outputs = model(inputs)
@@ -220,7 +235,7 @@ def main():
                 train_loss = running_loss / len(train_loader)
                 train_losses.append(train_loss)
 
-                # VALIDATION 
+                # Validation loop
                 model.eval()  # Set the model to evaluation mode
                 val_running_loss = 0.0
 
@@ -251,10 +266,9 @@ def main():
                     'val_loss': val_loss
                 })
 
-
                 # Log and save training history and weights
                 logger.info(f"EPOCH {epoch+1}: Val Loss: {val_loss:.4f}")
-                
+
                 if num_epochs > 20:
                     if (epoch + 1) % 4 == 0:
                         torch.save(model.state_dict(), f'{log_folder_name}/model_epoch_{epoch+1}.pth')
