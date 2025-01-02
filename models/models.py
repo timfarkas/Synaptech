@@ -1,120 +1,141 @@
 import torch
 import torch.nn as nn
-from torch.nn.functional import relu
+import torch.nn.functional as F
 
 class EEGtoMEGUNet(nn.Module):
+    """
+    A simplified U-Net style model for EEG-to-MEG prediction.
+    This model is intentionally smaller to reduce the likelihood of overfitting,
+    but includes a recurrent layer (LSTM) in the 'bridge' to capture temporal dependencies.
+    """
+
     def __init__(self):
         super().__init__()
         
-        # Encoder 
-        # First Level - kernel size to match input channels
-        self.e11 = nn.Conv2d(1, 128, kernel_size=(74, 3), padding=(0, 1), stride=(1, 1))    
-        self.e12 = nn.Conv2d(128, 128, kernel_size=(1, 3), padding=(0, 1))   
-        self.pool1 = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))         
+        # ------------------------
+        # Encoder
+        # ------------------------
+        # First Level
+        self.e11 = nn.Conv2d(1, 32, kernel_size=(74, 3), padding=(0, 1))
+        self.e12 = nn.Conv2d(32, 32, kernel_size=(1, 3), padding=(0, 1))
+        self.pool1 = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))
 
         # Second Level
-        self.e21 = nn.Conv2d(128, 256, kernel_size=(1, 3), padding=(0, 1))   
-        self.e22 = nn.Conv2d(256, 256, kernel_size=(1, 3), padding=(0, 1))   
+        self.e21 = nn.Conv2d(32, 64, kernel_size=(1, 3), padding=(0, 1))
+        self.e22 = nn.Conv2d(64, 64, kernel_size=(1, 3), padding=(0, 1))
         self.pool2 = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))
 
-        # Third Level
-        self.e31 = nn.Conv2d(256, 512, kernel_size=(1, 3), padding=(0, 1))   
-        self.e32 = nn.Conv2d(512, 512, kernel_size=(1, 3), padding=(0, 1))   
-        self.pool3 = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))        
-
-        # Bridge 
-        self.flatten = nn.Flatten()
-        self.bridge_mlp = nn.Sequential(
-            nn.Linear(17408, 4096),  # 17408 = 512 * 1 * 34
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(4096, 17408),
+        # ------------------------
+        # Bridge (recurrent layer)
+        # ------------------------
+        # Instead of a fully connected MLP bridging, we use LSTM to capture temporal dependencies
+        # xp2 will be [batch, 64, 1, T], so we reshape to [batch, T, 64] for the LSTM.
+        self.lstm_hidden = 32
+        self.lstm = nn.LSTM(
+            input_size=64,    # matches "channels" from xp2
+            hidden_size=self.lstm_hidden,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=False
         )
-        self.unflatten = nn.Unflatten(1, (512, 1, 34))
+        
+        # We'll project the LSTM hidden dim (32) back to 64 so the decoder has the same channels
+        self.lstm_out_projection = nn.Conv1d(self.lstm_hidden, 64, kernel_size=1)
 
+        # ------------------------
         # Decoder
-        self.upconv1 = nn.ConvTranspose2d(512, 512, kernel_size=(1, 2), stride=(1, 2))
-        self.d11 = nn.Conv2d(1024, 512, kernel_size=(1, 3), padding=(0, 1))   
-        self.d12 = nn.Conv2d(512, 512, kernel_size=(1, 3), padding=(0, 1))    
+        # ------------------------
+        # Deconvolution layers symmetric to the encoder
+        self.upconv1 = nn.ConvTranspose2d(64, 64, kernel_size=(1, 2), stride=(1, 2))
+        self.d11 = nn.Conv2d(64 + 64, 64, kernel_size=(1, 3), padding=(0, 1))
+        self.d12 = nn.Conv2d(64, 64, kernel_size=(1, 3), padding=(0, 1))
 
-        self.upconv2 = nn.ConvTranspose2d(512, 256, kernel_size=(1, 2), stride=(1, 2))
-        self.d21 = nn.Conv2d(512, 256, kernel_size=(1, 3), padding=(0, 1))    
-        self.d22 = nn.Conv2d(256, 256, kernel_size=(1, 3), padding=(0, 1))    
-
-        self.upconv3 = nn.ConvTranspose2d(256, 128, kernel_size=(1, 2), stride=(1, 2))
-        self.d31 = nn.Conv2d(256, 128, kernel_size=(1, 3), padding=(0, 1))    
-        self.d32 = nn.Conv2d(128, 128, kernel_size=(1, 3), padding=(0, 1))    
+        self.upconv2 = nn.ConvTranspose2d(64, 32, kernel_size=(1, 2), stride=(1, 2))
+        self.d21 = nn.Conv2d(32 + 32, 32, kernel_size=(1, 3), padding=(0, 1))
+        self.d22 = nn.Conv2d(32, 32, kernel_size=(1, 3), padding=(0, 1))
 
         # Output layer
-        self.outconv = nn.Conv2d(128, 102, kernel_size=(1, 1))                   
-        
+        self.outconv = nn.Conv2d(32, 102, kernel_size=(1, 1))
+
         # Final upsampling to match target size
         self.final_upsample = nn.Upsample(size=(1, 275), mode='bilinear', align_corners=False)
-        
-        self.dropout = nn.Dropout(0.5)
+
+        self.dropout = nn.Dropout(0.3)
         self.relu = nn.ReLU()
 
-
     def forward(self, x):
-        # Reshape input: [batch, channels, time] -> [batch, 1, channels, time]
+        """
+        Forward pass of the simplified U-Net for EEG-to-MEG.
+        Expected input shape: [batch, channels=1, time=275].
+        Returns: [batch, 102, time=275].
+        """
+
+        # Add a spatial dimension => [batch, 1, EEG_channels=74, time=275]
+        # (We assume your EEG_channels dimension is 74, matching the kernel (74,3). If it's different, adjust accordingly.)
         x = x.unsqueeze(1)
-        
+
+        # ------------------------
         # Encoder
-        xe11 = self.relu(self.e11(x))
-        xe12 = self.relu(self.e12(xe11))
-        xp1 = self.pool1(xe12)
+        # ------------------------
+        xe11 = self.relu(self.e11(x))     # -> [batch, 32, 1, time]
+        xe12 = self.relu(self.e12(xe11))  # -> [batch, 32, 1, time]
+        xp1 = self.pool1(xe12)            # -> [batch, 32, 1, time/2]
         xp1 = self.dropout(xp1)
 
-        xe21 = self.relu(self.e21(xp1))
-        xe22 = self.relu(self.e22(xe21))
-        xp2 = self.pool2(xe22)
+        xe21 = self.relu(self.e21(xp1))   # -> [batch, 64, 1, time/2]
+        xe22 = self.relu(self.e22(xe21))  # -> [batch, 64, 1, time/2]
+        xp2 = self.pool2(xe22)            # -> [batch, 64, 1, time/4]
         xp2 = self.dropout(xp2)
 
-        xe31 = self.relu(self.e31(xp2))
-        xe32 = self.relu(self.e32(xe31))
-        xp3 = self.pool3(xe32)
-        xp3 = self.dropout(xp3)
+        # ------------------------
+        # Bridge (Recurrent)
+        # ------------------------
+        # xp2 is [batch, 64, 1, T], so let's remove the dummy spatial dim and reorder to [batch, T, 64].
+        xp2_squeezed = xp2.squeeze(2)                # -> [batch, 64, T]
+        xp2_squeezed = xp2_squeezed.permute(0, 2, 1)  # -> [batch, T, 64]
 
-        # Bridge
-        xb = self.flatten(xp3)
-        xb = self.bridge_mlp(xb)
-        xb2 = self.unflatten(xb)
-        xb2 = self.dropout(xb2)
+        # Pass through LSTM
+        lstm_out, _ = self.lstm(xp2_squeezed)         # -> [batch, T, self.lstm_hidden]
 
-        # Decoder with size matching
-        xu1 = self.upconv1(xb2)
-        if xu1.size(-1) != xe32.size(-1): # ABSOLUTE ORGY. TO BE FIXED !!!
-            diff = xe32.size(-1) - xu1.size(-1) # ABSOLUTE ORGY. TO BE FIXED !!!
-            xu1 = torch.nn.functional.pad(xu1, [0, diff, 0, 0]) # ABSOLUTE ORGY. TO BE FIXED !!!
-        xu11 = torch.cat([xu1, xe32], dim=1)
-        xd11 = self.relu(self.d11(xu11))
-        xd12 = self.relu(self.d12(xd11))
+        # Project back to 64 channels for decoding
+        # First permute to [batch, self.lstm_hidden, T] for a 1D conv
+        lstm_out = lstm_out.permute(0, 2, 1)          # -> [batch, self.lstm_hidden, T]
+        lstm_out = self.lstm_out_projection(lstm_out) # -> [batch, 64, T]
+
+        # Add dropout before decoding
+        lstm_out = self.dropout(lstm_out)
+
+        # Reshape back to [batch, 64, 1, T]
+        xb2 = lstm_out.unsqueeze(2)  # -> [batch, 64, 1, T]
+
+        # ------------------------
+        # Decoder
+        # ------------------------
+        # Level 1
+        xu1 = self.upconv1(xb2)    # -> [batch, 64, 1, time/2]
+        if xu1.size(-1) != xe22.size(-1):
+            # Pad if there's a mismatch in time dimension
+            diff = xe22.size(-1) - xu1.size(-1)
+            xu1 = F.pad(xu1, [0, diff, 0, 0])
+        xu11 = torch.cat([xu1, xe22], dim=1)  # -> [batch, 128, 1, time/2]
+        xd11 = self.relu(self.d11(xu11))      # -> [batch, 64, 1, time/2]
+        xd12 = self.relu(self.d12(xd11))      # -> [batch, 64, 1, time/2]
         xd12 = self.dropout(xd12)
 
-        xu2 = self.upconv2(xd12)
-        if xu2.size(-1) != xe22.size(-1): # ABSOLUTE ORGY. TO BE FIXED !!!
-            diff = xe22.size(-1) - xu2.size(-1) # ABSOLUTE ORGY. TO BE FIXED !!!
-            xu2 = torch.nn.functional.pad(xu2, [0, diff, 0, 0]) # ABSOLUTE ORGY. TO BE FIXED !!!
-        xu22 = torch.cat([xu2, xe22], dim=1)
-        xd21 = self.relu(self.d21(xu22))
-        xd22 = self.relu(self.d22(xd21))
-        xd22 = self.dropout(xd22)
+        # Level 2
+        xu2 = self.upconv2(xd12)   # -> [batch, 32, 1, time]
+        if xu2.size(-1) != xe12.size(-1):
+            diff = xe12.size(-1) - xu2.size(-1)
+            xu2 = F.pad(xu2, [0, diff, 0, 0])
+        xu22 = torch.cat([xu2, xe12], dim=1)  # -> [batch, 64, 1, time]
+        xd21 = self.relu(self.d21(xu22))      # -> [batch, 32, 1, time]
+        xd22 = self.relu(self.d22(xd21))      # -> [batch, 32, 1, time]
 
-        xu3 = self.upconv3(xd22)
-        if xu3.size(-1) != xe12.size(-1): # ABSOLUTE ORGY. TO BE FIXED !!!
-            diff = xe12.size(-1) - xu3.size(-1) # ABSOLUTE ORGY. TO BE FIXED !!!
-            xu3 = torch.nn.functional.pad(xu3, [0, diff, 0, 0]) # ABSOLUTE ORGY. TO BE FIXED !!!
-        xu33 = torch.cat([xu3, xe12], dim=1)
-        xd31 = self.relu(self.d31(xu33))
-        xd32 = self.relu(self.d32(xd31))
+        # ------------------------
+        # Output
+        # ------------------------
+        out = self.outconv(xd22)          # -> [batch, 102, 1, time]
+        out = self.final_upsample(out)    # -> [batch, 102, 1, 275] upsampled to full time
+        out = out.squeeze(2)              # -> [batch, 102, 275]
 
-        # Output layer
-        out = self.outconv(xd32)
-        
-        # Upsample to match target size
-        out = self.final_upsample(out)
-        
-        # Remove the singleton dimension
-        out = out.squeeze(2)
-        
         return out
