@@ -1,6 +1,6 @@
 [
     {
-        "name": "test",
+        "name": "Unet-S-ME-LSTM",
         "epochs": 10,
         "learning_rate": 0.0001,
         "num_workers": 14,
