@@ -15,7 +15,7 @@ Another interesting interpretatiton of this work is that by mapping EEG signal -
 ## Set-up 🔧
 Create anaconda environment
 ```
-conda create -n synaptech_env python=3.10 -y 
+conda env create -f environment.yml
 conda activate synaptech_env
 ```
 
