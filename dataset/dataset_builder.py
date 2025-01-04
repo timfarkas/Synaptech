@@ -1,4 +1,3 @@
-from torch.utils.data import Dataset
 import os
 import logging
 import traceback
@@ -7,9 +6,7 @@ import zipfile
 import random
 import re
 import numpy as np
-import contextlib
 import mne
-from tqdm import tqdm  # for progress bars
 import warnings
 import torch
 import warnings
@@ -37,7 +34,7 @@ class DatasetDownloader:
         passedDownloadURLs = kwargs.get('downloadURLs', defaultDownloadURLs)
         self.downloadURLs = passedDownloadURLs if passedDownloadURLs else defaultDownloadURLs
 
-        self.datasetPath = kwargs.get('datasetPath', os.path.join('/srv','synaptech_openfmri'))
+        self.datasetPath = kwargs.get('datasetPath', os.path.join('/srv','openfmri'))
 
         self.logger = kwargs.get('logger', None)
         self.verbose = kwargs.get('verbose', False)
@@ -340,7 +337,7 @@ class DatasetDownloader:
 
 class DatasetPreprocesser():
     def __init__(self,**kwargs):
-        self.datasetPath = kwargs.get('datasetPath', os.path.join('/srv','synaptech_openfmri'))
+        self.datasetPath = kwargs.get('datasetPath', os.path.join('/srv','openfmri'))
 
         self.logger = kwargs.get('logger', None)
         self.verbose = kwargs.get('verbose', False)
@@ -363,12 +360,12 @@ class DatasetPreprocesser():
         self._checkDatasetIntegrity(self.datasetPath)
         self._meanPoolData(self.datasetPath)
         self._makeTensorShards(self.datasetPath)
-    
+        
     def _checkDatasetIntegrity(self, datasetPath):
         """
         Checks the integrity of the dataset by ensuring that the dataset folder
         contains only directories for subjects and that each subject directory
-        contains only files with the extensions '.txt' or '.fif'.
+        contains only allowed files and directories.
 
         Parameters:
         - datasetPath (str): The path to the dataset directory to be checked.
@@ -388,7 +385,14 @@ class DatasetPreprocesser():
                 assert len(os.listdir(os.path.join(datasetPath,modeFolder,subjectFolder)))>0, f"Subject folder {modeFolder}/{subjectFolder} unexpectedly empty"
                 ### iterate through run files in subject folders
                 for file in os.listdir(os.path.join(datasetPath,modeFolder,subjectFolder)):
-                    assert ".txt" in file or ".fif" in file, f"Unexpected file {file} in folder {modeFolder}/{subjectFolder}"
+                    # Allow .txt files, .fif files, and EEG/MAG shard directories
+                    is_valid = (
+                        ".txt" in file or 
+                        ".fif" in file or 
+                        file == "EEG_shards" or 
+                        file == "MAG_shards"
+                    )
+                    assert is_valid, f"Unexpected file/directory {file} in folder {modeFolder}/{subjectFolder}"
         return True
     
 
@@ -587,7 +591,7 @@ class DatasetPreprocesser():
                 logger.error(f"Failed to read {fif_path}: {str(e)}")
                 return None
 
-        def _collect_global_stats(dataset_path="/srv/synaptech_openfmri"):
+        def _collect_global_stats(dataset_path="/srv/openfmri"):
             """
             Pass 1:
             - Traverse all train/val/test .fif files,
@@ -855,7 +859,7 @@ class DatasetPreprocesser():
                             failed_files.append(run_path)
                             continue
 
-        def _main_zscore_shard_pipeline(dataset_path="/srv/synaptech_openfmri", window_size=275, shard_output_dir=None):
+        def _main_zscore_shard_pipeline(dataset_path="/srv/openfmri", window_size=275, shard_output_dir=None):
             """
             1) Gather global stats (means & std) for each EEG & MAG channel across entire dataset.
             2) Re-loop, apply z-score, chunk, save shards in float16.

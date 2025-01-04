@@ -15,6 +15,7 @@ import sys
 import time
 import wandb
 from dataset.shard_loader import ShardDataLoader
+from dataset.dataset_builder import DatasetDownloader
 import re  # Import the re module for regular expressions
 
 # Flag to indicate if termination has been requested
@@ -143,6 +144,10 @@ def main():
 
         load_dotenv()
         dataset_path = os.getenv("DATASET_PATH")
+
+        logger = logging.getLogger()
+        
+        DatasetDownloader(downloadAndPrepareImmediately=True, datasetPath=dataset_path, processImmediately=True, processingMode='raw', logger=logger, verbose=False)
 
         logger.info("Initializing ShardDataLoader...")
         shard_data_loader_train = ShardDataLoader(dataset_path=dataset_path, mode='train', logger=logger, verbose=verbose)
