@@ -1,169 +1,239 @@
-import os
 import torch
 from pathlib import Path
-import glob
-from tqdm.notebook import tqdm
-from dotenv import load_dotenv
 import warnings
 import numpy as np
 import pywt
+from tqdm import tqdm  
+import numpy as np
 
-load_dotenv()
-DATASET_PATH = os.getenv('DATASET_PATH')
-
-
-# Load and concatenate the data
-dataset_path = DATASET_PATH  # Adjust this path as needed
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 class Wavelet_Transformer():
-    def __init__(self):
-        self.startWaveletFiltering() 
-
-    def startWaveletFiltering(self):
-        eeg_tensor, mag_tensor = self._load_and_concat_shards(dataset_path) 
-        wavelet_bands_eeg, wavelet_bands_mag = self._filter_wavelet_bands(eeg_tensor, mag_tensor) # Output shape [3, 275, 25706]
-
-    ######################################################################## 
-    # ADJUST THE FUNCTION TO WORK ON BOTH TRAIN, TEST & VAL SET
-    ########################################################################
-    def _load_and_concat_shards(self, dataset_path, mode='train'): 
+    def __init__(
+        self,
+        dataset_path,
+        mode='train',
+        eeg_channel=13,
+        mag_channel=21
+    ):
         """
-        Loads and concatenates all EEG and MAG shards from the specified dataset path and mode.
+        Applies wavelet transforms to EEG and MEG data.
 
         Args:
-            dataset_path (str): Path to the dataset root directory
-            mode (str): One of 'train', 'val', or 'test'
+            dataset_path: Root path containing train/val/test subdirectories
+            mode: Dataset split to process ('train', 'val', 'test', None, 'all')
+            eeg_channel: EEG channel(s) to transform (int or 'all')
+            mag_channel: MEG channel(s) to transform (int or 'all')
 
-        Returns:
-            tuple: (concatenated_eeg, concatenated_mag) tensors
+        Creates .waveleted marker file to avoid reprocessing.
         """
 
-        warnings.filterwarnings('ignore')
+        self.dataset_path = dataset_path
+        valid_modes = ['train', 'val', 'test', None, 'all']
+        if mode not in valid_modes:
+            raise ValueError(f"Mode must be one of {valid_modes} but got {mode}")
+        self.mode = mode if mode in ['train', 'val', 'test'] else None
 
-        eeg_tensors = []
-        mag_tensors = []
+        self.eeg_channel = eeg_channel
+        self.mag_channel = mag_channel
 
-        # Get all subject folders in the specified mode
-        mode_path = Path(dataset_path) / mode
-        subject_folders = sorted([f for f in mode_path.iterdir() if f.is_dir()])
-
-        print(f"Loading {mode} data from {len(subject_folders)} subjects...")
-
-        # Iterate through each subject folder
-        for subject_folder in tqdm(subject_folders, desc="Loading subjects"):
-            # Load EEG shards
-            eeg_shard_folder = subject_folder / "EEG_shards"
-            if eeg_shard_folder.exists():
-                eeg_files = sorted(eeg_shard_folder.glob("*.pt"))
-                for eeg_file in eeg_files:
-                    eeg_tensor = torch.load(eeg_file)
-                    eeg_tensors.append(eeg_tensor)
-            
-            # Load MAG shards
-            mag_shard_folder = subject_folder / "MAG_shards"
-            if mag_shard_folder.exists():
-                mag_files = sorted(mag_shard_folder.glob("*.pt"))
-                for mag_file in mag_files:
-                    mag_tensor = torch.load(mag_file)
-                    mag_tensors.append(mag_tensor)
-
-        # Concatenate all tensors
-        if eeg_tensors:
-            concatenated_eeg = torch.cat(eeg_tensors, dim=2)  # Concatenate along windows dimension
+        # Check if a .waveleted marker already exists
+        self.waveleted_marker = Path(self.dataset_path) / ".waveleted"
+        if self.waveleted_marker.exists():
+            pass
         else:
-            concatenated_eeg = None
-            
-        if mag_tensors:
-            concatenated_mag = torch.cat(mag_tensors, dim=2)  # Concatenate along windows dimension
+            # Automatically run the wavelet filtering (only if marker does not exist)
+            self.process_shards_individually()
+            # Create the .waveleted marker so we don't re-run next time
+            self.waveleted_marker.touch()
+            print(f"Finished wavelet transform.")
+
+    def process_shards_individually(self):
+        """
+        1) Always process 'train', 'val', 'test' – if self.mode=None or 'all', we do all three.
+        2) Collect all .pt shards (EEG & MAG) from all subjects in each mode.
+        3) Display exactly one progress bar per mode with the message:
+        "Computing wavelet transform for {mode}:"
+        4) Load each PT file, apply wavelet transform, and save to disk.
+        """
+
+        # We'll always process these three modes.
+        # If the user specified 'train', 'val', or 'test', we'll process only that one.
+        if self.mode in ['train', 'val', 'test']:
+            modes_to_process = [self.mode]
         else:
-            concatenated_mag = None
+            modes_to_process = ['train', 'val', 'test']
 
-        return concatenated_eeg, concatenated_mag
+        for mode in modes_to_process:
+            mode_path = Path(self.dataset_path) / mode
+            if not mode_path.exists():
+                print(f"Skipping non-existent mode folder {mode_path}")
+                continue
 
-        
-    def _compute_wavelet_transform(data_1d, sampling_rate=250, frequencies=None, wavelet='cmor1.5-1.0'):
-        """
-        Compute the continuous wavelet transform for a 1D signal.
-        
-        Args:
-            data_1d (1D array): The signal values (e.g., one channel over time).
-            sampling_rate (float): Sampling rate of the signal (Hz).
-            frequencies (array): Array of frequencies to analyze. If None, creates a default set.
-            wavelet (str): Name of the wavelet to use (default: 'cmor1.5-1.0').
-            
-        Returns:
-            (coeffs, freqs): 
-                coeffs is a 2D numpy array of shape (num_freqs, num_time_points)
-                freqs is a 1D numpy array of frequencies corresponding to each row of coeffs
-        """
-        if frequencies is None:
-            # Example frequency range 1-100 Hz
-            frequencies = np.logspace(np.log10(1), np.log10(100), num=60)
-        
-        # Convert frequencies to scales
-        scales = pywt.frequency2scale(wavelet, frequencies / sampling_rate)
-        
-        # Perform continuous wavelet transform
-        coeffs, _ = pywt.cwt(data_1d, scales, wavelet)
-        return coeffs, frequencies
+            # Gather all PT files (EEG & MAG) for this mode
+            pt_files = []
+            subject_folders = [f for f in mode_path.iterdir() if f.is_dir()]
 
-    def _filter_wavelet_bands(eeg_data, mag_data, eeg_channel=13, mag_channel=21):
+            for subj_folder in subject_folders:
+                # EEG shards
+                eeg_shards_path = subj_folder / "EEG_shards"
+                if eeg_shards_path.exists():
+                    out_eeg_wavelet_dir = subj_folder / "EEG_WAVELET_shards"
+                    out_eeg_wavelet_dir.mkdir(exist_ok=True)
+                    for pt_file in sorted(eeg_shards_path.glob("*.pt")):
+                        pt_files.append(("EEG", pt_file, out_eeg_wavelet_dir))
+
+                # MAG shards
+                mag_shards_path = subj_folder / "MAG_shards"
+                if mag_shards_path.exists():
+                    out_mag_wavelet_dir = subj_folder / "MAG_WAVELET_shards"
+                    out_mag_wavelet_dir.mkdir(exist_ok=True)
+                    for pt_file in sorted(mag_shards_path.glob("*.pt")):
+                        pt_files.append(("MAG", pt_file, out_mag_wavelet_dir))
+
+            # Single progress bar for all EEG+MAG shards in this mode
+            from tqdm import tqdm
+            for shard_type, pt_file, output_dir in tqdm(pt_files, desc=f"Computing wavelets for [{mode}]"):
+                data = torch.load(pt_file)
+                if shard_type == "EEG":
+                    wavelet_eeg, _ = self._filter_wavelet_bands(
+                        data, 
+                        None,  
+                        self.eeg_channel,  
+                        None
+                    )
+                    out_name = pt_file.stem + "_wavelet.pt"
+                    torch.save(wavelet_eeg.float(), output_dir / out_name)
+                else:  # shard_type == "MAG"
+                    _, wavelet_mag = self._filter_wavelet_bands(
+                        None, 
+                        data,  
+                        None, 
+                        self.mag_channel
+                    )
+                    out_name = pt_file.stem + "_wavelet.pt"
+                    torch.save(wavelet_mag.float(), output_dir / out_name)
+
+    def _filter_wavelet_bands(self, eeg_data, mag_data, eeg_channel=13, mag_channel=21):
         """
-        For the given EEG and MAG channel & data, compute wavelet transforms, 
-        keeping only alpha, beta, and gamma frequency bands. 
-        
-        Returns two tensors:
-        - wavelet_bands_eeg: (3, time_points, total_windows) for alpha, beta, gamma
-        - wavelet_bands_mag: (3, time_points, total_windows)
-        
-        Where each index on the 0th dimension corresponds to:
-        0 => alpha band average (8-13 Hz)
-        1 => beta band average (13-30 Hz)
-        2 => gamma band average (30-100 Hz)
+        Returns (wavelet_bands_eeg, wavelet_bands_mag).
+
+        If 'all' is specified for eeg_channel or mag_channel, we process each channel 
+        in the corresponding data. Then wavelet_bands_eeg / wavelet_bands_mag will have shape:
+            [n_eeg_channels, 3, time_points, num_windows] or
+            [n_mag_channels, 3, time_points, num_windows]
+        respectively.
+                  OR
+        If an integer channel index is specified, the shape is 
+            [3, time_points, num_windows]. 
+
+        band_dict indicates the frequency bands computed from cwt:
+        - alpha: (8, 13)
+        - beta: (13, 30)
+        - gamma: (30, 100)
         """
-        # Define frequency bands
+
+
         band_dict = {
             'alpha': (8, 13),
-            'beta':  (13, 30),
+            'beta': (13, 30),
             'gamma': (30, 100),
         }
-        
-        # Grab shapes
-        # EEG shape => (num_eeg_channels, 275, total_windows)
-        # We'll focus on just "eeg_channel" across all windows
-        num_windows = eeg_data.shape[2]
-        time_points = eeg_data.shape[1]
-        
-        # Create empty arrays to store the results for alpha, beta, gamma
-        # shape => (3, time_points, num_windows)
-        wavelet_bands_eeg = np.zeros((3, time_points, num_windows), dtype=np.float32)
-        wavelet_bands_mag = np.zeros((3, time_points, num_windows), dtype=np.float32)
-        
-        # Iterate over each window, compute wavelet, average power in each band
-        for w in range(num_windows):
-            # Extract signals for this window
-            eeg_signal = eeg_data[eeg_channel, :, w].cpu().numpy()
-            mag_signal = mag_data[mag_channel, :, w].cpu().numpy()
-            
-            # Compute wavelet
-            eeg_coeffs, freqs = _compute_wavelet_transform(eeg_signal)
-            mag_coeffs, _     = _compute_wavelet_transform(mag_signal)
-            
-            # For each band (alpha, beta, gamma), compute the average magnitude across freq range
-            for i, (band_name, (fmin, fmax)) in enumerate(band_dict.items()):
-                # Identify which rows in the wavelet transform correspond to the band
-                band_mask = (freqs >= fmin) & (freqs <= fmax)
-                
-                # EEG band average across freq dimension => shape (time_points,)
-                band_eeg_vals = np.mean(np.abs(eeg_coeffs[band_mask, :]), axis=0)
-                wavelet_bands_eeg[i, :, w] = band_eeg_vals
-                
-                # MAG band average
-                band_mag_vals = np.mean(np.abs(mag_coeffs[band_mask, :]), axis=0)
-                wavelet_bands_mag[i, :, w] = band_mag_vals
-        
-        # Convert to torch tensors
-        wavelet_bands_eeg = torch.from_numpy(wavelet_bands_eeg)
-        wavelet_bands_mag = torch.from_numpy(wavelet_bands_mag)
-        
+
+        wavelet_bands_eeg = None
+        wavelet_bands_mag = None
+
+        # Handle EEG data (if it exists)
+        if eeg_data is not None:
+            n_channels_eeg = eeg_data.shape[0]
+            time_points = eeg_data.shape[1]
+            num_windows = eeg_data.shape[2]
+
+            # Figure out which channels to process
+            if eeg_channel == 'all':
+                channels_to_use = range(n_channels_eeg)
+            else:
+                channels_to_use = [eeg_channel]
+
+            multiple_eeg_channels = (len(channels_to_use) > 1)
+            if multiple_eeg_channels:
+                wavelet_bands_eeg = np.zeros(
+                    (len(channels_to_use), 3, time_points, num_windows),
+                    dtype=np.float32
+                )
+            else:
+                wavelet_bands_eeg = np.zeros(
+                    (3, time_points, num_windows),
+                    dtype=np.float32
+                )
+
+            for idx, ch in enumerate(channels_to_use):
+                for w in range(num_windows):
+                    eeg_signal = eeg_data[ch, :, w].cpu().numpy()
+                    eeg_coeffs, freqs = self._compute_wavelet_transform(eeg_signal)
+
+                    for band_i, (fmin, fmax) in enumerate(band_dict.values()):
+                        band_mask = (freqs >= fmin) & (freqs <= fmax)
+                        band_vals = np.mean(np.abs(eeg_coeffs[band_mask, :]), axis=0)
+                        if multiple_eeg_channels:
+                            wavelet_bands_eeg[idx, band_i, :, w] = band_vals
+                        else:
+                            wavelet_bands_eeg[band_i, :, w] = band_vals
+
+            wavelet_bands_eeg = torch.from_numpy(wavelet_bands_eeg)
+
+        # Handle MAG data (if it exists)
+        if mag_data is not None:
+            n_channels_mag = mag_data.shape[0]
+            time_points = mag_data.shape[1]
+            num_windows = mag_data.shape[2]
+
+            if mag_channel == 'all':
+                channels_to_use = range(n_channels_mag)
+            else:
+                channels_to_use = [mag_channel]
+
+            multiple_mag_channels = (len(channels_to_use) > 1)
+            if multiple_mag_channels:
+                wavelet_bands_mag = np.zeros(
+                    (len(channels_to_use), 3, time_points, num_windows),
+                    dtype=np.float32
+                )
+            else:
+                wavelet_bands_mag = np.zeros(
+                    (3, time_points, num_windows), 
+                    dtype=np.float32
+                )
+
+            for idx, ch in enumerate(channels_to_use):
+                for w in range(num_windows):
+                    mag_signal = mag_data[ch, :, w].cpu().numpy()
+                    mag_coeffs, freqs = self._compute_wavelet_transform(mag_signal)
+
+                    for band_i, (fmin, fmax) in enumerate(band_dict.values()):
+                        band_mask = (freqs >= fmin) & (freqs <= fmax)
+                        band_vals = np.mean(np.abs(mag_coeffs[band_mask, :]), axis=0)
+                        if multiple_mag_channels:
+                            wavelet_bands_mag[idx, band_i, :, w] = band_vals
+                        else:
+                            wavelet_bands_mag[band_i, :, w] = band_vals
+
+            wavelet_bands_mag = torch.from_numpy(wavelet_bands_mag)
+
         return wavelet_bands_eeg, wavelet_bands_mag
+
+    def _compute_wavelet_transform(self, data_1d, sampling_rate=275, frequencies=None, wavelet='cmor1.5-1.0'):
+        """
+        Returns (coeffs, freqs). Adjust wavelet parameters to suit your data.
+
+        cwt output shape: (#scales, len(data_1d))
+        The frequencies array has length #scales, matching the 0th dimension of coeffs.
+        """
+        import numpy as np
+        import pywt
+
+        if frequencies is None:
+            frequencies = np.logspace(np.log10(1), np.log10(100), num=60)
+        scales = pywt.frequency2scale(wavelet, frequencies / sampling_rate)
+        coeffs, _ = pywt.cwt(data_1d, scales, wavelet)
+        return coeffs, frequencies

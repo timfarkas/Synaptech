@@ -390,7 +390,9 @@ class DatasetPreprocesser():
                         ".txt" in file or 
                         ".fif" in file or 
                         file == "EEG_shards" or 
-                        file == "MAG_shards"
+                        file == "MAG_shards" or
+                        file == "EEG_WAVELET_shards" or 
+                        file == "MAG_WAVELET_shards"     
                     )
                     assert is_valid, f"Unexpected file/directory {file} in folder {modeFolder}/{subjectFolder}"
         return True
