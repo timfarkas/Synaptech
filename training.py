@@ -1,7 +1,8 @@
 from dotenv import load_dotenv
 import os
 from torch.utils.data import DataLoader
-from models.unet import EEGtoMEGUNet
+# from models.unet import EEGtoMEGUNet #Uncomment if not using wavelet transform
+from models.wavelet_unet import EEGtoMEGUNet # Comment out if not using wavelet transform
 import matplotlib.pyplot as plt
 import json
 import torch
@@ -155,8 +156,8 @@ def main():
 
         Wavelet_Transformer(dataset_path=dataset_path, mode='all', eeg_channel=13, mag_channel=21)
 
-        shard_data_loader_train = ShardDataLoader(dataset_path=dataset_path, mode='train', logger=logger, verbose=verbose, wavelet=False)
-        shard_data_loader_val = ShardDataLoader(dataset_path=dataset_path, mode='val', logger=logger, verbose=verbose, wavelet=False)
+        shard_data_loader_train = ShardDataLoader(dataset_path=dataset_path, mode='train', logger=logger, verbose=verbose, wavelet=True)
+        shard_data_loader_val = ShardDataLoader(dataset_path=dataset_path, mode='val', logger=logger, verbose=verbose, wavelet=True)
         sample_length = 275 
 
         print ("i think its donezo")

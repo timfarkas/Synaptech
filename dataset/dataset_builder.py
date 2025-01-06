@@ -11,7 +11,9 @@ import warnings
 import torch
 import warnings
 import torch
+from tqdm import tqdm
 
+from .wavelet_filtering import Wavelet_Transformer
 class DatasetDownloader:
     """
     A class to handle downloading and preparing datasets for processing.
@@ -49,8 +51,12 @@ class DatasetDownloader:
             self.logger.setLevel(logging.DEBUG)
 
         if downloadAndPrepareImmediately:
-            if os.path.exists(os.path.join(self.datasetPath,'.randomized')) and os.path.exists(os.path.join(self.datasetPath,'.arranged')) and os.path.exists(os.path.join(self.datasetPath,'.unzipped')) and os.path.exists(os.path.join(self.datasetPath,'.downloaded')):
-
+            if os.path.exists(os.path.join(self.datasetPath,'.randomized')) \
+               and os.path.exists(os.path.join(self.datasetPath,'.arranged')) \
+               and os.path.exists(os.path.join(self.datasetPath,'.unzipped')) \
+               and os.path.exists(os.path.join(self.datasetPath,'.downloaded')) \
+               and os.path.exists(os.path.join(self.datasetPath,'.sharded')) \
+               and os.path.exists(os.path.join(self.datasetPath,'.waveleted')):
                 self.logger.info("Skipping downloading and preparing... (Found .downloaded, .unzipped, .arranged, .randomized files)")
             else:
                 self.startDownloadingAndPrepare()
@@ -58,11 +64,13 @@ class DatasetDownloader:
             if os.path.exists(os.path.join(self.datasetPath,'.processed')):
                 self.logger.info("Skipping processing...")
             else:
-                processer = DatasetPreprocesser(datasetPath = self.datasetPath, 
-                                                processImmediately = True, 
-                                                mode = self.processingMode, 
-                                                logger = self.logger,
-                                                verbose = self.verbose)
+                processer = DatasetPreprocesser(
+                    datasetPath = self.datasetPath, 
+                    processImmediately = True, 
+                    mode = self.processingMode, 
+                    logger = self.logger,
+                    verbose = self.verbose
+                )
 
     def startDownloadingAndPrepare(self):
         assert self.downloadURLs is not None and len(self.downloadURLs)>0, f"No download URLs specified. (Given {self.downloadURLs})"
@@ -225,6 +233,7 @@ class DatasetDownloader:
             self.logger.debug(f"sub:{desiredSubFolder},  parent:{datasetFolder}")
             DatasetDownloader.moveContentsToParentAndDeleteSub(participantFolderPath,desiredSubFolder)
 
+
         ### go through participant folders again and renames fif files to standardized format
         participantFolders = [f for f in os.listdir(datasetFolder) if not f.startswith('.') and not f.endswith('.zip')]
         self.logger.debug(f"Participant folders: \n{participantFolders}")
@@ -298,7 +307,6 @@ class DatasetDownloader:
         else:
             self.logger.info("Dataset has already been randomized. Skipping randomization step.")
 
-
     @staticmethod
     def moveContentsToParentAndDeleteSub(parentfolder, intermediateFolders, expectedContentCount = None, folderOnly = False):
         """
@@ -316,6 +324,8 @@ class DatasetDownloader:
         None
         """
         intermediateFolderPath = os.path.join(parentfolder, intermediateFolders)
+        if not os.path.exists(intermediateFolderPath):
+            return
         if expectedContentCount is not None:
             actualContentCount = len(os.listdir(intermediateFolderPath))
             assert actualContentCount == expectedContentCount, (
@@ -466,9 +476,11 @@ class DatasetPreprocesser():
             """
             try:
                 logger.info(f"Processing & Overwriting: {fif_path}")
-                raw_original = mne.io.read_raw_fif(fif_path, preload=True)
-                original_data = raw_original.get_data()
-                original_sf = raw_original.info['sfreq']
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")  # Ignore MNE warnings
+                    raw_original = mne.io.read_raw_fif(fif_path, preload=True)
+                    original_data = raw_original.get_data()
+                    original_sf = raw_original.info['sfreq']
             except Exception as e:
                 logger.error(f"Failed to read {fif_path}")
                 logger.error(f"Error: {str(e)}")
@@ -516,7 +528,7 @@ class DatasetPreprocesser():
                 logger.error(f"Error: {str(e)}")
                 return False
 
-        def _process_all(dataset_path="/srv/synaptech_openmri_1"):
+        def _process_all(dataset_path):
             """
             Processes all .fif files in a dataset, organized by train/val/test.
             Parameters:
@@ -526,7 +538,7 @@ class DatasetPreprocesser():
             """
             processed_files = []
             failed_files = []
-            
+
             for mode in ["train", "val", "test"]:
                 mode_path = os.path.join(dataset_path, mode)
                 if not os.path.isdir(mode_path):
@@ -565,12 +577,18 @@ class DatasetPreprocesser():
 
 
     def _makeTensorShards(self, datasetPath):
+        """
+        Reads raw data, chunks into windows, saves as shards
 
+        Parameters:
+            dataset_path (str): Path to the dataset root directory.
+            window_size (int, optional): Size of each window in samples. Defaults to 275.
+            shard_output_dir (str, optional): Directory to save the shards. If None, saves in subject directories.
+            allow_padding (bool, optional): Whether to pad short sequences. Defaults to False.
+        """
         pooled_marker = os.path.join(datasetPath, '.sharded')
         if os.path.exists(pooled_marker):
             return
-                
-
         warnings.filterwarnings("ignore",message=".* does not conform to MNE naming conventions.*",category=RuntimeWarning,)
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.INFO)
@@ -583,204 +601,67 @@ class DatasetPreprocesser():
         mne.set_log_level("WARNING")
 
         def _safe_read_fif(fif_path):
-            """
-            Safely read a .fif file, returning None if corrupted
-            """
             try:
-                raw = mne.io.read_raw_fif(fif_path, preload=True)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    raw = mne.io.read_raw_fif(fif_path, preload=True)
                 return raw
             except Exception as e:
-                logger.error(f"Failed to read {fif_path}: {str(e)}")
+                self.logger.warning(f"Skipping corrupted file {fif_path}: {str(e)}")
                 return None
 
-        def _collect_global_stats(dataset_path="/srv/openfmri"):
+
+        def _make_3d_windows(data_2d, window_size=275, allow_padding=False, mode="EEG"):
             """
-            Pass 1:
-            - Traverse all train/val/test .fif files,
-            - Collect sums and sums_of_squares for each channel (EEG & MAG).
-            - Then compute mean & std for each channel.
-
-            Returns a dictionary with:
-            {
-                "eeg_mean": np.array of shape [n_eeg_channels],
-                "eeg_std":  np.array of shape [n_eeg_channels],
-                "mag_mean": np.array of shape [n_mag_channels],
-                "mag_std":  np.array of shape [n_mag_channels]
-            }
+            Convert 2D array (channels x timepoints) into 3D tensor (channels x window_size x num_windows)
             """
-            logger.info("Collecting global channel stats (EEG & MAG) across the entire dataset...")
-
-            processed_files = []
-            failed_files = []
-
-            eeg_channel_count = None
-            mag_channel_count = None
-            sums_eeg = None
-            sums_sqr_eeg = None
-            num_samples_eeg = 0
-            sums_mag = None
-            sums_sqr_mag = None
-            num_samples_mag = 0
-
-            for mode in ["train", "val", "test"]:
-                mode_path = os.path.join(dataset_path, mode)
-                if not os.path.isdir(mode_path):
-                    continue
-
-                subjects = sorted(os.listdir(mode_path))
-                for subject in subjects:
-                    subject_path = os.path.join(mode_path, subject)
-                    if not os.path.isdir(subject_path):
-                        continue
-
-                    run_files = [f for f in os.listdir(subject_path) if f.endswith(".fif")]
-                    for run_file in run_files:
-                        run_path = os.path.join(subject_path, run_file)
-                        logger.debug(f"(Stats) Loading {run_path}")
-
-                        raw = _safe_read_fif(run_path)
-                        if raw is None:
-                            failed_files.append(run_path)
-                            continue
-
-                        try:
-                            data_all = raw.get_data()
-
-                            # EEG
-                            eeg_indices = mne.pick_types(raw.info, meg=False, eeg=True)
-                            if len(eeg_indices) > 0:
-                                eeg_data = data_all[eeg_indices, :]
-                                n_eeg_ch, n_times = eeg_data.shape
-
-                                if eeg_channel_count is None:
-                                    eeg_channel_count = n_eeg_ch
-                                    sums_eeg = np.zeros(eeg_channel_count, dtype=np.float64)
-                                    sums_sqr_eeg = np.zeros(eeg_channel_count, dtype=np.float64)
-
-                                if n_eeg_ch != eeg_channel_count:
-                                    logger.error(f"EEG channel count mismatch: {n_eeg_ch} vs. {eeg_channel_count}")
-                                    continue
-
-                                sums_eeg += np.sum(eeg_data, axis=1)
-                                sums_sqr_eeg += np.sum(eeg_data**2, axis=1)
-                                num_samples_eeg += n_times
-
-                            # MAG
-                            mag_indices = mne.pick_types(raw.info, meg='mag', eeg=False)
-                            if len(mag_indices) > 0:
-                                mag_data = data_all[mag_indices, :]
-                                n_mag_ch, n_times = mag_data.shape
-
-                                if mag_channel_count is None:
-                                    mag_channel_count = n_mag_ch
-                                    sums_mag = np.zeros(mag_channel_count, dtype=np.float64)
-                                    sums_sqr_mag = np.zeros(mag_channel_count, dtype=np.float64)
-
-                                if n_mag_ch != mag_channel_count:
-                                    logger.error(f"MAG channel count mismatch: {n_mag_ch} vs. {mag_channel_count}")
-                                    continue
-
-                                sums_mag += np.sum(mag_data, axis=1)
-                                sums_sqr_mag += np.sum(mag_data**2, axis=1)
-                                num_samples_mag += n_times
-
-                            processed_files.append(run_path)
-
-                        except Exception as e:
-                            logger.error(f"Error processing {run_path}: {str(e)}")
-                            failed_files.append(run_path)
-                            continue
-
-            # Compute statistics
-            if eeg_channel_count is not None and num_samples_eeg > 0:
-                mean_eeg = sums_eeg / num_samples_eeg
-                e_x2 = sums_sqr_eeg / num_samples_eeg
-                var_eeg = e_x2 - mean_eeg**2
-                var_eeg = np.maximum(var_eeg, 1e-20)
-                std_eeg = np.sqrt(var_eeg)
-            else:
-                mean_eeg = np.array([])
-                std_eeg = np.array([])
-
-            if mag_channel_count is not None and num_samples_mag > 0:
-                mean_mag = sums_mag / num_samples_mag
-                e_x2 = sums_sqr_mag / num_samples_mag
-                var_mag = e_x2 - mean_mag**2
-                var_mag = np.maximum(var_mag, 1e-20)
-                std_mag = np.sqrt(var_mag)
-            else:
-                mean_mag = np.array([])
-                std_mag = np.array([])
-
-            logger.info(f"Stats collection complete. Processed {len(processed_files)} files.")
-            if failed_files:
-                logger.warning(f"Failed to process {len(failed_files)} files:")
-                for f in failed_files:
-                    logger.warning(f"  - {f}")
-
-            return {
-                "eeg_mean": mean_eeg,
-                "eeg_std": std_eeg,
-                "mag_mean": mean_mag,
-                "mag_std": std_mag,
-                "processed_files": processed_files,
-                "failed_files": failed_files
-            }
-
-        def _make_3d_windows(data, window_size=275, allow_padding=False, mode="EEG"):
-            """
-            Same as before: chunk data -> [n_channels, window_size, n_windows].
-            """
-            n_channels, n_times = data.shape
-            n_windows = n_times // window_size
-            leftover = n_times % window_size
+            n_channels, n_timepoints = data_2d.shape
+            n_windows = n_timepoints // window_size
 
             if n_windows == 0:
-                if allow_padding and (n_times > 0):
-                    pad_window = np.zeros((n_channels, window_size), dtype=data.dtype)
-                    pad_window[:, :n_times] = data
-                    pad_window = pad_window.reshape(n_channels, window_size, 1)
-                    return torch.from_numpy(pad_window)
+                if allow_padding:
+                    # Pad to make one full window
+                    pad_amount = window_size - n_timepoints
+                    data_2d = np.pad(data_2d, ((0, 0), (0, pad_amount)), mode='constant')
+                    n_windows = 1
                 else:
-                    logger.warning(f"Skipping {mode.upper()} because it has only {n_times} < {window_size} samples.")
+                    logger.warning(f"Skipping {mode} data: too short ({n_timepoints} < {window_size})")
                     return None
 
-            used = n_windows * window_size
-            blocks = data[:, :used]
-            blocks = blocks.reshape(n_channels, n_windows, window_size)
-            blocks = np.transpose(blocks, (0, 2, 1))
+            # Truncate to full windows
+            data_2d = data_2d[:, :n_windows * window_size]
+            
+            # Reshape to 3D
+            data_3d = data_2d.reshape(n_channels, n_windows, window_size).transpose(0, 2, 1)
+            return torch.from_numpy(data_3d)
+        
 
-            if leftover > 0 and allow_padding:
-                pad_window = np.zeros((n_channels, window_size), dtype=data.dtype)
-                pad_window[:, :leftover] = data[:, used:]
-                pad_window = pad_window.reshape(n_channels, window_size, 1)
-                blocks = np.concatenate([blocks, pad_window], axis=2)
-
-            return torch.from_numpy(blocks)
-
-        def _apply_zscore_and_save_shards(dataset_path, stats, window_size=275, shard_output_dir=None, allow_padding=False):
+        def _make_and_save_shards(dataset_path, window_size=275, shard_output_dir=None, allow_padding=False):
             """
-            Pass 2:
-            - Use the global stats (stats['eeg_mean'], stats['eeg_std'], etc.).
-            - For each run, pick EEG => (data - mean) / std => chunk => save float16.
-            - Same for MAG.
+            Create and save shards without normalization.
             """
-            logger.info(f"Applying z-score normalization & saving shards in float16. Using window_size={window_size}")
-
-            mean_eeg = stats["eeg_mean"]
-            std_eeg = stats["eeg_std"]
-            mean_mag = stats["mag_mean"]
-            std_mag = stats["mag_std"]
-
-            processed_files = []
-            failed_files = []
 
             for mode in ["train", "val", "test"]:
                 mode_path = os.path.join(dataset_path, mode)
                 if not os.path.isdir(mode_path):
                     continue
 
+                # Count total files first
+                total_files = 0
                 subjects = sorted(os.listdir(mode_path))
+                for subject in subjects:
+                    subject_path = os.path.join(mode_path, subject)
+                    if not os.path.isdir(subject_path):
+                        continue
+                    run_files = [f for f in os.listdir(subject_path) if f.endswith(".fif")]
+                    total_files += len(run_files)
+
+                if total_files == 0:
+                    continue
+
+                # Create progress bar for this mode
+                pbar = tqdm(total=total_files, desc=f"Computing shards for {mode}", bar_format='{desc:<30} {percentage:3.0f}%|{bar:50}{r_bar}')
+
                 for subject in subjects:
                     subject_path = os.path.join(mode_path, subject)
                     if not os.path.isdir(subject_path):
@@ -789,105 +670,94 @@ class DatasetPreprocesser():
                     run_files = [f for f in os.listdir(subject_path) if f.endswith(".fif")]
                     for run_file in run_files:
                         run_path = os.path.join(subject_path, run_file)
-                        logger.info(f"[Z-score pass] Loading {run_path}")
-
-                        # Skip if file was previously identified as corrupted
-                        if run_path in stats.get('failed_files', []):
-                            logger.warning(f"Skipping previously identified corrupted file: {run_path}")
-                            failed_files.append(run_path)
-                            continue
-
-                        # Safely read the file
                         raw = _safe_read_fif(run_path)
                         if raw is None:
-                            failed_files.append(run_path)
+                            pbar.update(1)
                             continue
 
-                        try:
-                            data_all = raw.get_data()
+                        data_all = raw.get_data()
 
-                            # EEG
-                            eeg_indices = mne.pick_types(raw.info, meg=False, eeg=True)
-                            eeg_data = data_all[eeg_indices, :]
-                            if eeg_data.size > 0 and len(eeg_indices) == len(mean_eeg):
-                                for ch_i in range(len(eeg_indices)):
-                                    eeg_data[ch_i, :] = (eeg_data[ch_i, :] - mean_eeg[ch_i]) / std_eeg[ch_i]
+                        # EEG
+                        eeg_indices = mne.pick_types(raw.info, meg=False, eeg=True)
+                        eeg_data = data_all[eeg_indices, :]
+                        if eeg_data.size > 0:
+                            shard_eeg = _make_3d_windows(
+                                eeg_data,
+                                window_size=window_size,
+                                allow_padding=allow_padding,
+                                mode="EEG"
+                            )
+                            if shard_eeg is not None:
+                                if shard_output_dir:
+                                    out_dir = os.path.join(shard_output_dir, mode, subject)
+                                else:
+                                    out_dir = os.path.join(subject_path, "EEG_shards")
+                                os.makedirs(out_dir, exist_ok=True)
 
-                                shard_eeg = _make_3d_windows(eeg_data, window_size=window_size, 
-                                                        allow_padding=allow_padding, mode="EEG")
-                                if shard_eeg is not None:
-                                    if shard_output_dir:
-                                        out_dir = os.path.join(shard_output_dir, mode, subject)
-                                    else:
-                                        out_dir = os.path.join(subject_path, "EEG_shards")
-                                    os.makedirs(out_dir, exist_ok=True)
+                                name_base, _ = os.path.splitext(run_file)
+                                out_fname = f"{name_base}_eeg.pt"
+                                out_path = os.path.join(out_dir, out_fname)
 
-                                    name_base, _ = os.path.splitext(run_file)
-                                    out_fname = f"{name_base}_eeg.pt"
-                                    out_path = os.path.join(out_dir, out_fname)
+                                torch.save(shard_eeg, out_path)
 
-                                    shard_eeg_fp16 = shard_eeg.half()
-                                    torch.save(shard_eeg_fp16, out_path)
-                                    logger.info(f"Z-scored EEG => shape={tuple(shard_eeg_fp16.shape)}: {out_path}")
+                        # MAG
+                        mag_indices = mne.pick_types(raw.info, meg='mag', eeg=False)
+                        mag_data = data_all[mag_indices, :]
+                        if mag_data.size > 0:
+                            shard_mag = _make_3d_windows(
+                                mag_data,
+                                window_size=window_size,
+                                allow_padding=allow_padding,
+                                mode="MAG"
+                            )
+                            if shard_mag is not None:
+                                if shard_output_dir:
+                                    out_dir = os.path.join(shard_output_dir, mode, subject)
+                                else:
+                                    out_dir = os.path.join(subject_path, "MAG_shards")
+                                os.makedirs(out_dir, exist_ok=True)
 
-                            # MAG
-                            mag_indices = mne.pick_types(raw.info, meg='mag', eeg=False)
-                            mag_data = data_all[mag_indices, :]
-                            if mag_data.size > 0 and len(mag_indices) == len(mean_mag):
-                                for ch_i in range(len(mag_indices)):
-                                    mag_data[ch_i, :] = (mag_data[ch_i, :] - mean_mag[ch_i]) / std_mag[ch_i]
+                                name_base, _ = os.path.splitext(run_file)
+                                out_fname = f"{name_base}_mag.pt"
+                                out_path = os.path.join(out_dir, out_fname)
 
-                                shard_mag = _make_3d_windows(mag_data, window_size=window_size, 
-                                                        allow_padding=allow_padding, mode="MAG")
-                                if shard_mag is not None:
-                                    if shard_output_dir:
-                                        out_dir = os.path.join(shard_output_dir, mode, subject)
-                                    else:
-                                        out_dir = os.path.join(subject_path, "MAG_shards")
-                                    os.makedirs(out_dir, exist_ok=True)
+                                torch.save(shard_mag, out_path)
+                        pbar.update(1)
+                pbar.close()
 
-                                    name_base, _ = os.path.splitext(run_file)
-                                    out_fname = f"{name_base}_mag.pt"
-                                    out_path = os.path.join(out_dir, out_fname)
-
-                                    shard_mag_fp16 = shard_mag.half()
-                                    torch.save(shard_mag_fp16, out_path)
-                                    logger.info(f"Z-scored MAG => shape={tuple(shard_mag_fp16.shape)}: {out_path}")
-
-                            processed_files.append(run_path)
-
-                        except Exception as e:
-                            logger.error(f"Error processing {run_path}: {str(e)}")
-                            failed_files.append(run_path)
-                            continue
-
-        def _main_zscore_shard_pipeline(dataset_path="/srv/openfmri", window_size=275, shard_output_dir=None):
+        
+        def _main_shard_pipeline(dataset_path, window_size=275, shard_output_dir=None):
             """
-            1) Gather global stats (means & std) for each EEG & MAG channel across entire dataset.
-            2) Re-loop, apply z-score, chunk, save shards in float16.
+            Main pipeline to create shards
             """
-            logger.info("=== PASS 1: Gathering global stats ===")
-            stats = _collect_global_stats(dataset_path=dataset_path)
-            logger.info("Computed global EEG means/stds shapes: "
-                        f"{stats['eeg_mean'].shape}, {stats['eeg_std'].shape}")
-            logger.info("Computed global MAG means/stds shapes: "
-                        f"{stats['mag_mean'].shape}, {stats['mag_std'].shape}")
-
-            logger.info("=== PASS 2: Applying z-score & saving shards ===")
-            results = _apply_zscore_and_save_shards(
+            _make_and_save_shards(
                 dataset_path=dataset_path,
-                stats=stats,
                 window_size=window_size,
                 shard_output_dir=shard_output_dir,
                 allow_padding=False
             )
-            
-            logger.info("Z-score pipeline complete.")
 
             pooled_marker = os.path.join(dataset_path, '.sharded')
             with open(pooled_marker, 'w') as marker_file:
                 marker_file.write('')
-            
-            return results
 
-        _main_zscore_shard_pipeline(dataset_path=datasetPath, window_size=275, shard_output_dir=None)
+        _main_shard_pipeline(dataset_path=datasetPath, window_size=275, shard_output_dir=None)
+
+
+    def _runWaveletTransform(self, dataset_path):
+        logger = logging.getLogger(__name__)
+        wavelet_marker = os.path.join(dataset_path, '.wavelet')
+        if os.path.exists(wavelet_marker):
+            self.logger.info("Skipping wavelet transformation (found .wavelet marker)")
+        else:
+            self.logger.info("Creating wavelet transformed shards...")
+            wavelet_transformer = Wavelet_Transformer(
+                dataset_path=dataset_path,
+                mode='all',
+                eeg_channel=13,
+                mag_channel=21
+            )
+            wavelet_transformer.process_wavelet_shards()
+            # Create marker file after successful wavelet processing
+            with open(wavelet_marker, 'w') as marker_file:
+                marker_file.write('')

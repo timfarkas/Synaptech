@@ -130,12 +130,16 @@ class ShardDataLoader:
         mag_tensors = []
 
         for i, (eeg_shard_path, mag_shard_path) in enumerate(self.shard_pairs):
-            
             try:
                 eeg_shard = torch.load(eeg_shard_path)
                 mag_shard = torch.load(mag_shard_path)
 
-                # Reshape each shard to [channels, -1] to line them up by time
+                print(f"[DEBUG] Loading pair {i}:")
+                print(f"  EEG: {os.path.basename(eeg_shard_path)}, shape={eeg_shard.shape}")
+                print(f"  MAG: {os.path.basename(mag_shard_path)}, shape={mag_shard.shape}")
+                print(f"  EEG mean={eeg_shard.mean():.3f}, MAG mean={mag_shard.mean():.3f}")
+
+                # Reshape each shard to [channels, -1]
                 eeg_shard = eeg_shard.reshape(eeg_shard.shape[0], -1)
                 mag_shard = mag_shard.reshape(mag_shard.shape[0], -1)
 
