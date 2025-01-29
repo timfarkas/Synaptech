@@ -1,6 +1,6 @@
 [
     {
-        "name": "Unet-S-ME-LSTM",
+        "name": "Unet-S-SE-WAVELT-LSTM",
         "epochs": 10,
         "learning_rate": 0.0001,
         "num_workers": 14,

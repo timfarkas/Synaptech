@@ -1,5 +1,7 @@
 ## Dataset Explained
 
+Study link: https://pmc.ncbi.nlm.nih.gov/articles/PMC4412149/
+
 How the script procesess the data:
 1. Extracting the electrode recordings from teh fif files
 2. Perfomring Wavelet transform to extract the desired frequencies
